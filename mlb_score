@@ -1,59 +1,66 @@
 #!/usr/bin/env python
+
+import argparse
+import os
 import time
 import requests
-import os
+import json
 from lifxlan import LifxLAN
 
-# ANSI color codes
+# ANSI colors for terminal output
 GREEN = "\033[92m"
 RED = "\033[91m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 
 def clear_screen():
-    """Clear the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def get_team_score(team_name="Astros"):
-    """Return the current score for the specified team (default: Houston Astros)."""
+def get_schedule():
+    """Fetch the MLB schedule (all games today)."""
     url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
-    resp = requests.get(url).json()
+    return requests.get(url).json()
 
-    for date in resp.get("dates", []):
+def find_team_game(team_name):
+    """Find today's game for the given team."""
+    schedule = get_schedule()
+    for date in schedule.get("dates", []):
         for game in date.get("games", []):
             teams = game.get("teams", {})
             home = teams.get("home", {})
             away = teams.get("away", {})
 
             if team_name.lower() in home.get("team", {}).get("name", "").lower():
-                return {
-                    "team": home["team"]["name"],
-                    "score": home.get("score", 0),
-                    "opponent": away["team"]["name"],
-                    "opponent_score": away.get("score", 0),
-                    "status": game.get("status", {}).get("detailedState")
-                }
-
+                return game, "home"
             if team_name.lower() in away.get("team", {}).get("name", "").lower():
-                return {
-                    "team": away["team"]["name"],
-                    "score": away.get("score", 0),
-                    "opponent": home["team"]["name"],
-                    "opponent_score": home.get("score", 0),
-                    "status": game.get("status", {}).get("detailedState")
-                }
-    return None
+                return game, "away"
+    return None, None
 
-def print_game_info(game_data):
-    """Print stylized scoreboard with color and raw JSON."""
-    if not game_data:
-        print("No game found.")
-        return
+def get_game_feed(gamePk):
+    """Fetch the full live data feed for a game."""
+    url = f"https://statsapi.mlb.com/api/v1/game/{gamePk}/feed/live"
+    return requests.get(url).json()
 
-    team_score = game_data['score']
-    opp_score = game_data['opponent_score']
+def pretty_score(game, team_side):
+    """Pretty print scoreboard info for the team."""
+    teams = game["teams"]
+    home = teams["home"]
+    away = teams["away"]
 
-    # Decide color
+    if team_side == "home":
+        team = home
+        opp = away
+    else:
+        team = away
+        opp = home
+
+    team_name = team["team"]["name"]
+    opp_name = opp["team"]["name"]
+    team_score = team.get("score", 0)
+    opp_score = opp.get("score", 0)
+    status = game["status"]["detailedState"]
+
+    # Colorize text output
     if team_score > opp_score:
         color = GREEN
     elif team_score < opp_score:
@@ -62,23 +69,32 @@ def print_game_info(game_data):
         color = YELLOW
 
     print("=== Pretty Scoreboard ===")
-    print(f"{color}{game_data['team']} ({team_score}) "
-          f"vs {game_data['opponent']} ({opp_score}) "
-          f"| Game status: {game_data['status']}{RESET}")
+    print(f"{color}{team_name} ({team_score}) vs {opp_name} ({opp_score}) "
+          f"| Game status: {status}{RESET}")
 
-    print("\n=== Raw JSON ===")
-    print(game_data)
+    return team_score, status
 
-def blink_lifx_orange(times=3, duration=0.5):
-    """Blink all available LIFX lights orange when Astros score."""
+def get_color(name):
+    """Return HSVK values for a given color name."""
+    presets = {
+        "orange": [6366, 65535, 65535, 3500],
+        "red": [0, 65535, 65535, 3500],
+        "blue": [43634, 65535, 65535, 3500],
+        "green": [21845, 65535, 65535, 3500],
+        "purple": [49151, 65535, 65535, 3500],
+        "white": [0, 0, 65535, 3500],
+    }
+    return presets.get(name.lower(), presets["orange"])
+
+def blink_lifx(color_name="orange", times=3, duration=0.5):
+    """Blink all available LIFX lights in the chosen color."""
     lifx = LifxLAN()
     devices = lifx.get_lights()
-
-    orange = [6366, 65535, 65535, 3500]  # HSVK for orange
+    color = get_color(color_name)
 
     for _ in range(times):
         for light in devices:
-            light.set_color(orange, rapid=True)
+            light.set_color(color, rapid=True)
         time.sleep(duration)
         for light in devices:
             light.set_power("off", rapid=True)
@@ -87,47 +103,72 @@ def blink_lifx_orange(times=3, duration=0.5):
             light.set_power("on", rapid=True)
 
 def countdown(interval):
-    """Display a live countdown timer for the next API check."""
+    """Show countdown until next poll."""
     for remaining in range(interval, 0, -1):
         print(f"\r⏱️ Next API check in {remaining} seconds... ", end="", flush=True)
         time.sleep(1)
-    print("\r", end="")  # Clear the line after countdown
+    print("\r", end="")
 
-def watch_astros():
-    """Continuously watch Astros score with adaptive polling and live countdown."""
+def watch_team(team_name, color_name):
+    """Continuously watch a team’s game and blink lights when they score."""
     last_score = None
     while True:
         clear_screen()
-        game_data = get_team_score("Astros")
-        if game_data:
-            print_game_info(game_data)
+        game, side = find_team_game(team_name)
+        if not game:
+            print(f"No {team_name} game today.")
+            interval = 3600
+        else:
+            team_score, status = pretty_score(game, side)
 
-            status = game_data["status"]
-
-            # Blink when Astros score
             if last_score is None:
-                last_score = game_data["score"]
-            elif game_data["score"] > last_score:
-                print(f"\n🎉 Astros scored! {last_score} → {game_data['score']}")
-                blink_lifx_orange()
-                last_score = game_data["score"]
+                last_score = team_score
+            elif team_score > last_score:
+                print(f"\n🎉 {team_name} scored! {last_score} → {team_score}")
+                blink_lifx(color_name)
+                last_score = team_score
 
             # Adaptive polling
             if status == "In Progress":
                 interval = 15
             elif status in ("Scheduled", "Pre-Game"):
-                interval = 300  # 5 min
+                interval = 300
             elif status == "Final":
-                interval = 3600  # 1 hour
+                interval = 3600
             else:
-                interval = 60  # fallback
+                interval = 60
 
-        else:
-            print("No Astros game today.")
-            interval = 3600  # check again in an hour
-
-        # Live countdown until next check
         countdown(interval)
 
+def list_teams():
+    """Fetch and print all MLB teams with IDs."""
+    url = "https://statsapi.mlb.com/api/v1/teams?sportId=1"
+    data = requests.get(url).json()
+    print("=== MLB Teams ===")
+    for team in data.get("teams", []):
+        print(f"{team['teamId']:>3} | {team['name']} ({team['abbreviation']})")
+
 if __name__ == "__main__":
-    watch_astros()
+    parser = argparse.ArgumentParser(description="Watch MLB team scores and blink LIFX lights.")
+    parser.add_argument("--team", help="Team name (e.g. 'Astros', 'Yankees')")
+    parser.add_argument("--color", default="orange", help="Blink color (orange, red, blue, green, purple, white)")
+    parser.add_argument("--dump", action="store_true", help="Dump full JSON from live feed for debugging")
+    parser.add_argument("--list-teams", action="store_true", help="List all MLB teams and IDs")
+    args = parser.parse_args()
+
+    if args.list_teams:
+        list_teams()
+    elif args.dump:
+        if not args.team:
+            print("You must use --team with --dump")
+        else:
+            game, side = find_team_game(args.team)
+            if not game:
+                print(f"No {args.team} game today.")
+            else:
+                feed = get_game_feed(game["gamePk"])
+                print(json.dumps(feed, indent=2))
+    elif args.team:
+        watch_team(args.team, args.color)
+    else:
+        parser.print_help()
