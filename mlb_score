@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+import time
+import requests
+import os
+from lifxlan import LifxLAN
+
+# ANSI color codes
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
+
+def clear_screen():
+    """Clear the terminal screen."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def get_team_score(team_name="Astros"):
+    """Return the current score for the specified team (default: Houston Astros)."""
+    url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+    resp = requests.get(url).json()
+
+    for date in resp.get("dates", []):
+        for game in date.get("games", []):
+            teams = game.get("teams", {})
+            home = teams.get("home", {})
+            away = teams.get("away", {})
+
+            if team_name.lower() in home.get("team", {}).get("name", "").lower():
+                return {
+                    "team": home["team"]["name"],
+                    "score": home.get("score", 0),
+                    "opponent": away["team"]["name"],
+                    "opponent_score": away.get("score", 0),
+                    "status": game.get("status", {}).get("detailedState")
+                }
+
+            if team_name.lower() in away.get("team", {}).get("name", "").lower():
+                return {
+                    "team": away["team"]["name"],
+                    "score": away.get("score", 0),
+                    "opponent": home["team"]["name"],
+                    "opponent_score": home.get("score", 0),
+                    "status": game.get("status", {}).get("detailedState")
+                }
+    return None
+
+def print_game_info(game_data):
+    """Print stylized scoreboard with color and raw JSON."""
+    if not game_data:
+        print("No game found.")
+        return
+
+    team_score = game_data['score']
+    opp_score = game_data['opponent_score']
+
+    # Decide color
+    if team_score > opp_score:
+        color = GREEN
+    elif team_score < opp_score:
+        color = RED
+    else:
+        color = YELLOW
+
+    print("=== Pretty Scoreboard ===")
+    print(f"{color}{game_data['team']} ({team_score}) "
+          f"vs {game_data['opponent']} ({opp_score}) "
+          f"| Game status: {game_data['status']}{RESET}")
+
+    print("\n=== Raw JSON ===")
+    print(game_data)
+
+def blink_lifx_orange(times=3, duration=0.5):
+    """Blink all available LIFX lights orange when Astros score."""
+    lifx = LifxLAN()
+    devices = lifx.get_lights()
+
+    orange = [6366, 65535, 65535, 3500]  # HSVK for orange
+
+    for _ in range(times):
+        for light in devices:
+            light.set_color(orange, rapid=True)
+        time.sleep(duration)
+        for light in devices:
+            light.set_power("off", rapid=True)
+        time.sleep(duration)
+        for light in devices:
+            light.set_power("on", rapid=True)
+
+def countdown(interval):
+    """Display a live countdown timer for the next API check."""
+    for remaining in range(interval, 0, -1):
+        print(f"\r⏱️ Next API check in {remaining} seconds... ", end="", flush=True)
+        time.sleep(1)
+    print("\r", end="")  # Clear the line after countdown
+
+def watch_astros():
+    """Continuously watch Astros score with adaptive polling and live countdown."""
+    last_score = None
+    while True:
+        clear_screen()
+        game_data = get_team_score("Astros")
+        if game_data:
+            print_game_info(game_data)
+
+            status = game_data["status"]
+
+            # Blink when Astros score
+            if last_score is None:
+                last_score = game_data["score"]
+            elif game_data["score"] > last_score:
+                print(f"\n🎉 Astros scored! {last_score} → {game_data['score']}")
+                blink_lifx_orange()
+                last_score = game_data["score"]
+
+            # Adaptive polling
+            if status == "In Progress":
+                interval = 15
+            elif status in ("Scheduled", "Pre-Game"):
+                interval = 300  # 5 min
+            elif status == "Final":
+                interval = 3600  # 1 hour
+            else:
+                interval = 60  # fallback
+
+        else:
+            print("No Astros game today.")
+            interval = 3600  # check again in an hour
+
+        # Live countdown until next check
+        countdown(interval)
+
+if __name__ == "__main__":
+    watch_astros()
