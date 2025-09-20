@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""
+Canvas-based Astros scoreboard with MLB live API + LIFX effects.
+
+- Canvas retro TV-style scoreboard (all caps team names)
+- Bases diamond (simple filled indicators when occupied)
+- Outs dots, At-bat, Current batter
+- Status line with countdown (next update in Ns)
+- Dynamic polling: intervals change with game state
+- Countdown driven by Tkinter .after loop; API fetch is done in a background thread,
+  and countdown resets only after the fetch thread finishes (keeps UI responsive)
+- Debug logging to console
+- LIFX effects: opponent score -> red single flash; end-of-game -> rainbow if ASTROS win,
+  shades of red if opponent wins. All effects save/restore previous light state.
+"""
+
+import threading
+import time
+import tkinter as tk
+from tkinter import font as tkfont
+import requests
+import signal
+import sys
+
+# Try to import LifxLAN, if unavailable stub gracefully
+try:
+    from lifxlan import LifxLAN
+except Exception:
+    LifxLAN = None
+
+# ---------- CONFIG ----------
+TEAM_NAME = "ASTROS"  # uppercase for matching/display
+POLL_INTERVAL_IN_PROGRESS = 20
+POLL_INTERVAL_SCHEDULED = 300
+POLL_INTERVAL_DEFAULT = 60
+OPPONENT_FLASH_DURATION = 0.5
+END_GAME_EFFECT_DURATION = 10
+LIFX_DISCOVER_TIMEOUT = 3
+
+MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+MLB_LIVE_FEED_TEMPLATE = "https://statsapi.mlb.com/api/v1.1/game/{}/feed/live"
+# ----------------------------
+
+# ---------- LIFX Manager ----------
+class LifxManager:
+    def __init__(self):
+        self.lights = []
+        self.saved_states = {}
+        self.lock = threading.Lock()
+        if LifxLAN is None:
+            print("[LIFX] lifxlan not installed; LIFX actions will be skipped.")
+            return
+        try:
+            self.lifx = LifxLAN()
+            # discovery is somewhat slow; do a quick get_lights
+            try:
+                self.lights = self.lifx.get_lights()
+                print(f"[LIFX] Discovered {len(self.lights)} lights")
+            except Exception as e:
+                print(f"[LIFX] Discovery error: {e}")
+                self.lights = []
+        except Exception as e:
+            print(f"[LIFX] LifxLAN init error: {e}")
+            self.lights = []
+
+    def discover(self):
+        if LifxLAN is None:
+            return
+        try:
+            self.lights = self.lifx.get_lights()
+            print(f"[LIFX] Rediscovered {len(self.lights)} lights")
+        except Exception as e:
+            print(f"[LIFX] discover() error: {e}")
+            self.lights = []
+
+    def save_state(self):
+        if LifxLAN is None:
+            return
+        with self.lock:
+            self.saved_states = {}
+            for light in self.lights:
+                try:
+                    power = light.get_power()
+                    color = light.get_color()
+                    label = light.get_label()
+                    uuid = getattr(light, "mac_addr", label)
+                    self.saved_states[uuid] = (power, color, label)
+                except Exception as e:
+                    print(f"[LIFX] save_state error for a light: {e}")
+
+    def restore_state(self):
+        if LifxLAN is None:
+            return
+        with self.lock:
+            for light in self.lights:
+                try:
+                    label = light.get_label()
+                    uuid = getattr(light, "mac_addr", label)
+                    if uuid in self.saved_states:
+                        power, color, _ = self.saved_states[uuid]
+                        try:
+                            light.set_color(color, 200)
+                        except Exception:
+                            pass
+                        try:
+                            if power:
+                                light.set_power("on", 200)
+                            else:
+                                light.set_power("off", 200)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"[LIFX] restore_state error: {e}")
+
+    def _set_all_color(self, hsbk, duration_ms=0):
+        if LifxLAN is None:
+            return
+        for light in self.lights:
+            try:
+                light.set_color(hsbk, duration_ms)
+                light.set_power("on", duration_ms)
+            except Exception as e:
+                print(f"[LIFX] _set_all_color error: {e}")
+
+    def flash_once_red_then_restore(self, single_duration=OPPONENT_FLASH_DURATION):
+        if LifxLAN is None:
+            print("[LIFX] flash_once_red_then_restore called but lifxlan missing.")
+            return
+        def _worker():
+            with self.lock:
+                print("[LIFX] flash_once_red_then_restore: saving state and flashing red")
+                self.save_state()
+                try:
+                    red = (0, 65535, 65535, 3500)
+                    self._set_all_color(red, 0)
+                    time.sleep(single_duration)
+                finally:
+                    print("[LIFX] flash_once_red_then_restore: restoring state")
+                    self.restore_state()
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def end_game_effect(self, astros_won: bool):
+        if LifxLAN is None:
+            print("[LIFX] end_game_effect called but lifxlan missing.")
+            return
+        def rainbow_worker():
+            with self.lock:
+                print("[LIFX] end_game_effect: rainbow start")
+                self.save_state()
+                try:
+                    end_time = time.time() + END_GAME_EFFECT_DURATION
+                    step = 0
+                    while time.time() < end_time:
+                        hue = int((step * 5000) % 65535)
+                        sat = 65535
+                        bri = 40000 + int((step * 200) % 25535)
+                        kelvin = 3500
+                        color = (hue, sat, bri, kelvin)
+                        for light in self.lights:
+                            try:
+                                light.set_color(color, 200)
+                                light.set_power("on", 200)
+                            except Exception:
+                                pass
+                        time.sleep(0.2)
+                        step += 1
+                finally:
+                    print("[LIFX] end_game_effect: restoring state")
+                    self.restore_state()
+
+        def red_wave_worker():
+            with self.lock:
+                print("[LIFX] end_game_effect: red-wave start")
+                self.save_state()
+                try:
+                    end_time = time.time() + END_GAME_EFFECT_DURATION
+                    step = 0
+                    while time.time() < end_time:
+                        sat = 30000 + (step * 3000) % 35535
+                        bri = 30000 + (step * 2000) % 35535
+                        color = (0, sat, bri, 3500)
+                        for light in self.lights:
+                            try:
+                                light.set_color(color, 200)
+                                light.set_power("on", 200)
+                            except Exception:
+                                pass
+                        time.sleep(0.25)
+                        step += 1
+                finally:
+                    print("[LIFX] end_game_effect: restoring state")
+                    self.restore_state()
+
+        t = threading.Thread(target=rainbow_worker if astros_won else red_wave_worker, daemon=True)
+        t.start()
+
+# ---------- Canvas Scoreboard UI ----------
+class CanvasScoreboard:
+    def __init__(self, root, width=700, height=400):
+        self.root = root
+        self.width = width
+        self.height = height
+        self.canvas = tk.Canvas(root, width=width, height=height, bg="#000000", highlightthickness=0)
+        self.canvas.pack()
+
+        # Fonts
+        self.font_big = tkfont.Font(family="Courier", size=36, weight="bold")
+        self.font_team = tkfont.Font(family="Courier", size=14, weight="bold")
+        self.font_small = tkfont.Font(family="Courier", size=12)
+        self.font_mono = tkfont.Font(family="Courier", size=10)
+
+        # Positions
+        self.top_y = 20
+        self.score_y = 80
+        self.diamond_y = 170
+        self.info_y = 270
+        self.status_y = 350
+
+        # initial placeholders
+        self.home_name = "ASTROS"
+        self.away_name = "OPPONENT"
+        self.home_score = 0
+        self.away_score = 0
+        self.inning = None
+        self.at_bat = None
+        self.outs = 0
+        self.batter = "-"
+        self.bases = {"1B": False, "2B": False, "3B": False}  # boolean occupancy
+        self.status = "No game"
+        self.next_update = POLL_INTERVAL_DEFAULT
+
+        # Draw initial UI
+        self._draw_static_elements()
+        self._draw_dynamic_elements()
+
+    def _draw_static_elements(self):
+        c = self.canvas
+        # outer frame (retro TV style)
+        pad = 8
+        c.create_rectangle(pad, pad, self.width - pad, self.height - pad, outline="#ffffff", width=6)
+        # top band for title
+        c.create_rectangle(10, 10, self.width - 10, 60, fill="#111111", outline="")
+        c.create_text(self.width // 2, 35, text="Astro's Scoreboard", font=self.font_small, fill="#00FF88")
+
+    def _draw_dynamic_elements(self):
+        c = self.canvas
+        c.delete("dynamic")  # remove previous dynamic drawings with this tag
+
+        # Scores - big central line
+        left_x = 80
+        right_x = self.width - 80
+        mid_x = self.width // 2
+        score_text = f"{self.home_name}  {self.home_score}  —  {self.away_score}  {self.away_name}"
+        c.create_text(mid_x, self.score_y, text=score_text, font=self.font_big, fill="#FFFF88", tags="dynamic")
+
+        # Inning / At bat
+        inning_text = f"INNING: {self.inning if self.inning is not None else '-'}"
+        atbat_text = f"AT BAT: {self.at_bat if self.at_bat is not None else '-'}"
+        c.create_text(140, self.info_y, text=inning_text, font=self.font_team, fill="#FFFFFF", anchor="w", tags="dynamic")
+        c.create_text(self.width - 140, self.info_y, text=atbat_text, font=self.font_team, fill="#FFFFFF", anchor="e", tags="dynamic")
+
+        # Batter name
+        batter_text = f"BATTER: {self.batter}"
+        c.create_text(self.width // 2, self.info_y + 30, text=batter_text, font=self.font_small, fill="#DDDDFF", tags="dynamic")
+
+        # Bases diamond (centered)
+        cx = self.width // 2
+        cy = self.diamond_y
+        size = 13
+        offset = 60
+        # positions: top = 2B, right = 1B, left = 3B, bottom = Home
+        coords = {
+            "2B": (cx, cy - offset),
+            "1B": (cx + offset, cy),
+            "3B": (cx - offset, cy),
+            "Home": (cx, cy + offset),
+        }
+        # draw connecting diamond
+        c.create_polygon(
+            coords["2B"][0], coords["2B"][1],
+            coords["1B"][0], coords["1B"][1],
+            coords["Home"][0], coords["Home"][1],
+            coords["3B"][0], coords["3B"][1],
+            outline="#888888", fill="", width=2, tags="dynamic"
+        )
+        # draw base circles
+        base_map = [("2B", "2B"), ("1B", "1B"), ("3B", "3B"), ("Home", "Home")]
+        for key, label in base_map:
+            x, y = coords[label]
+            occupied = False
+            if label == "Home":
+                # home is not an occupancy in linescore; ignore; show as empty outline
+                occupied = False
+            else:
+                occupied = self.bases.get(label, False)
+            if occupied:
+                fill = "#EB6E1F"  # Astro's orange when occupied
+            else:
+                fill = "#002D62"  # Astro's pantone when not occupied
+            c.create_oval(x - size, y - size, x + size, y + size, outline="#FFFFFF", width=2, fill=fill, tags="dynamic")
+            # small label
+            c.create_text(x, y, text=label, font=self.font_mono, fill="#000000" if occupied else "#FFFFFF", tags="dynamic")
+
+        # Outs -- draw up to 3 small circles, filled red for outs count
+        outs_x = self.width // 2
+        outs_y = self.diamond_y + 90
+        dot_spacing = 40
+        for i in range(3):
+            x = outs_x - dot_spacing + i * dot_spacing
+            y = outs_y
+            if i < self.outs:
+                c.create_oval(x - 6, y - 6, x + 6, y + 6, fill="#FF4444", outline="#660000", width=2, tags="dynamic")
+            else:
+                c.create_oval(x - 6, y - 6, x + 6, y + 6, outline="#555555", width=2, fill="", tags="dynamic")
+
+        # Status line (bottom)
+        status_text = f"STATUS: {self.status} (next update in {self.next_update}s)"
+        c.create_rectangle(20, self.status_y - 24, self.width - 20, self.status_y + 24, fill="#111111", outline="#333333", tags="dynamic")
+        c.create_text(self.width // 2, self.status_y, text=status_text, font=self.font_small, fill="#FFFF66", tags="dynamic")
+
+    def set_state(self, *, home_name=None, away_name=None, home_score=None, away_score=None,
+                  inning=None, at_bat=None, outs=None, batter=None, bases=None, status=None, next_update=None):
+        updated = False
+        if home_name is not None:
+            self.home_name = home_name.upper()
+            updated = True
+        if away_name is not None:
+            self.away_name = away_name.upper()
+            updated = True
+        if home_score is not None:
+            self.home_score = home_score
+            updated = True
+        if away_score is not None:
+            self.away_score = away_score
+            updated = True
+        if inning is not None:
+            self.inning = inning
+            updated = True
+        if at_bat is not None:
+            self.at_bat = at_bat
+            updated = True
+        if outs is not None:
+            self.outs = outs
+            updated = True
+        if batter is not None:
+            self.batter = batter
+            updated = True
+        if bases is not None:
+            self.bases = bases.copy()
+            updated = True
+        if status is not None:
+            self.status = status
+            updated = True
+        if next_update is not None:
+            self.next_update = next_update
+            updated = True
+
+        if updated:
+            self._draw_dynamic_elements()
+
+# ---------- Game controller (polling logic driven by UI .after) ----------
+class GameController:
+    def __init__(self, ui: CanvasScoreboard, lifx_mgr: LifxManager):
+        self.ui = ui
+        self.lifx = lifx_mgr
+        self.game_pk = None
+        self.last_home = None
+        self.last_away = None
+        self.countdown = POLL_INTERVAL_DEFAULT
+        self.fetching = False
+        self.running = True
+        # start the tick loop
+        self.ui.root.after(1000, self._tick)
+
+    def _tick(self):
+        # Called every second by Tkinter mainloop
+        if not self.running:
+            return
+        if self.fetching:
+            # show polling status while fetch in progress
+            self.ui.set_state(status="Polling...", next_update="--")
+        else:
+            # normal countdown display
+            if isinstance(self.countdown, int) and self.countdown >= 0:
+                self.ui.set_state(next_update=self.countdown)
+            else:
+                self.ui.set_state(next_update="--")
+            if self.countdown <= 0:
+                # time to fetch
+                self._start_fetch_thread()
+        # schedule next tick
+        self.ui.root.after(1000, self._tick)
+
+    def _start_fetch_thread(self):
+        if self.fetching:
+            return
+        self.fetching = True
+        t = threading.Thread(target=self._fetch_and_process, daemon=True)
+        t.start()
+
+    def _fetch_and_process(self):
+        try:
+            print("[DEBUG] Polling API...")
+            # If we don't have a game_pk yet, locate today's game for the team
+            if not self.game_pk:
+                sched_resp = requests.get(MLB_SCHEDULE_URL, timeout=10)
+                if sched_resp.status_code != 200:
+                    print(f"[DEBUG] schedule fetch failed {sched_resp.status_code}")
+                    # set a longer countdown for schedule failure
+                    self.countdown = POLL_INTERVAL_SCHEDULED
+                    self.fetching = False
+                    return
+                sched = sched_resp.json()
+                found = None
+                for date in sched.get("dates", []):
+                    for g in date.get("games", []):
+                        home = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+                        away = g.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+                        if TEAM_NAME.lower() in (home or "").lower() or TEAM_NAME.lower() in (away or "").lower():
+                            found = g
+                            break
+                    if found:
+                        break
+                if not found:
+                    # no game today
+                    print("[DEBUG] No game today found in schedule.")
+                    # update UI and set countdown longer
+                    self.ui.set_state(status="No game today", next_update=POLL_INTERVAL_SCHEDULED)
+                    self.countdown = POLL_INTERVAL_SCHEDULED
+                    self.fetching = False
+                    return
+                self.game_pk = found.get("gamePk")
+                print(f"[DEBUG] Found gamePk: {self.game_pk}")
+                # reset last scores
+                self.last_home = None
+                self.last_away = None
+
+            # fetch live feed
+            feed_url = MLB_LIVE_FEED_TEMPLATE.format(self.game_pk)
+            resp = requests.get(feed_url, timeout=10)
+            if resp.status_code != 200:
+                print(f"[DEBUG] Live feed fetch failed: {resp.status_code}")
+                # set default wait
+                self.countdown = POLL_INTERVAL_DEFAULT
+                self.fetching = False
+                return
+            data = resp.json()
+
+            # parse fields
+            home_name = data.get("gameData", {}).get("teams", {}).get("home", {}).get("name", "HOME")
+            away_name = data.get("gameData", {}).get("teams", {}).get("away", {}).get("name", "AWAY")
+            linescore = data.get("liveData", {}).get("linescore", {}) or {}
+            home_score = linescore.get("teams", {}).get("home", {}).get("runs", 0)
+            away_score = linescore.get("teams", {}).get("away", {}).get("runs", 0)
+            inning = linescore.get("currentInning")
+            inning_state = linescore.get("inningState")
+            outs = linescore.get("outs") or 0
+            status = data.get("gameData", {}).get("status", {}).get("detailedState", "Unknown")
+
+            # attempt to find batter name
+            batter = "-"
+            try:
+                current_play = data.get("liveData", {}).get("plays", {}).get("currentPlay", {}) or {}
+                match = current_play.get("matchup", {}) or {}
+                batter_obj = match.get("batter") or {}
+                batter = batter_obj.get("fullName") or batter_obj.get("lastName") or batter
+            except Exception:
+                batter = "-"
+
+            # bases occupancy - look at liveData.plays.currentPlay.runners and liveData.boxscore?linescore?.fallback
+            bases = {"1B": False, "2B": False, "3B": False}
+            try:
+                # primary: examine liveData.plays.currentPlay -> runners list
+                current_play = data.get("liveData", {}).get("plays", {}).get("currentPlay", {}) or {}
+                runners = current_play.get("runners", []) or []
+                for r in runners:
+                    movement = r.get("movement", {}) or {}
+                    origin = movement.get("originBase")
+                    end = movement.get("end")
+                    # Some feeds place baseOccupancy elsewhere; we interpret runners with 'originBase' or 'end'
+                    runner_pos = None
+                    if origin in ("1B", "2B", "3B"):
+                        runner_pos = origin
+                    if end in ("1B", "2B", "3B"):
+                        runner_pos = end
+                    if runner_pos:
+                        bases[runner_pos] = True
+                # fallback: linescore has something like 'offense' but not explicit bases; some feeds include 'onBase' list
+                # Check liveData.plays.playEvents for runnerOnBase events - omitted for brevity
+            except Exception:
+                # if parsing errors occur, leave bases as is
+                pass
+
+            # Update UI state (converted to uppercase team names)
+            # At-bat: bottom=home, top=away
+            at_bat = None
+            try:
+                if isinstance(inning_state, str):
+                    if inning_state.lower().startswith("top"):
+                        at_bat = "AWAY"
+                    elif inning_state.lower().startswith("bottom"):
+                        at_bat = "HOME"
+            except Exception:
+                at_bat = None
+
+            # Determine dynamic poll interval based on status
+            status_lower = (status or "").lower()
+            if "in progress" in status_lower or status_lower == "in progress":
+                interval = POLL_INTERVAL_IN_PROGRESS
+            elif "scheduled" in status_lower or "pre" in status_lower or "warmup" in status_lower:
+                interval = POLL_INTERVAL_SCHEDULED
+            else:
+                interval = POLL_INTERVAL_DEFAULT
+
+            # Detect scoring: only if we have previous values
+            opponent_scored = False
+            if self.last_home is not None and self.last_away is not None:
+                # find which side is team
+                home_is_team = TEAM_NAME.lower() in (home_name or "").lower()
+                if home_is_team:
+                    opponent_scored = away_score > (self.last_away or 0)
+                else:
+                    opponent_scored = home_score > (self.last_home or 0)
+
+            # Save last scores
+            self.last_home = home_score
+            self.last_away = away_score
+
+            # Update UI (caps team names)
+            self.ui.set_state(
+                home_name=home_name.upper(),
+                away_name=away_name.upper(),
+                home_score=home_score,
+                away_score=away_score,
+                inning=inning,
+                at_bat=at_bat,
+                outs=outs,
+                batter=batter,
+                bases=bases,
+                status=status,
+                next_update=interval
+            )
+
+            print(f"[DEBUG] Fetched: {home_name} {home_score} - {away_score} {away_name} | {status} | next interval {interval}s")
+
+            # If opponent scored -> flash red once then restore
+            if opponent_scored:
+                print("[DEBUG] Opponent scored -> triggering red flash")
+                self.lifx.flash_once_red_then_restore(OPPONENT_FLASH_DURATION)
+
+            # End-of-game detection
+            if status_lower in ("final", "game over", "final/after extra innings", "final/after suspension"):
+                astros_won = None
+                if TEAM_NAME.lower() in (home_name or "").lower():
+                    astros_won = (home_score > away_score)
+                elif TEAM_NAME.lower() in (away_name or "").lower():
+                    astros_won = (away_score > home_score)
+                # If astros_won is not None we trigger end-game effect
+                if astros_won is not None:
+                    print(f"[DEBUG] Game ended. Astros won? {astros_won}. Triggering end-game effect.")
+                    # ASTROS win -> rainbow, OPPONENT wins -> shades of red
+                    # (per your instruction: astros -> rainbow)
+                    self.lifx.end_game_effect(astros_won)
+
+                # reset game_pk so next scheduled search may find future game
+                self.game_pk = None
+                self.last_home = None
+                self.last_away = None
+                # set a default longer wait after final
+                interval = POLL_INTERVAL_DEFAULT
+
+            # set the countdown to the chosen interval (only after fetch completes)
+            self.countdown = int(interval)
+            print(f"[DEBUG] Countdown reset to {self.countdown}s")
+        except Exception as ex:
+            print(f"[ERROR] Exception during fetch/process: {ex}")
+            # on errors, set a safe fallback countdown
+            self.countdown = POLL_INTERVAL_DEFAULT
+        finally:
+            self.fetching = False
+
+    def stop(self):
+        self.running = False
+
+# ---------- Graceful exit ----------
+lifx_mgr = None
+def graceful_exit(sig=None, frame=None):
+    print("[MAIN] Exiting. Restoring lights if possible.")
+    try:
+        if lifx_mgr:
+            lifx_mgr.restore_state()
+    except Exception:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, graceful_exit)
+signal.signal(signal.SIGTERM, graceful_exit)
+
+# ---------- Main ----------
+def main():
+    global lifx_mgr
+    root = tk.Tk()
+    root.title("Astros - Retro TV Scoreboard")
+    # We'll fix window size for retro look
+    root.geometry("700x360")
+    canvas_ui = CanvasScoreboard(root)
+    lifx_mgr = LifxManager()
+    # optionally try a background discover to make sure lights are found
+    if LifxLAN is not None:
+        threading.Thread(target=lifx_mgr.discover, daemon=True).start()
+
+    controller = GameController(canvas_ui, lifx_mgr)
+
+    try:
+        root.mainloop()
+    finally:
+        print("[MAIN] GUI closed.")
+        try:
+            lifx_mgr.restore_state()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
