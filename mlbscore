@@ -602,7 +602,7 @@ def main():
     root = tk.Tk()
     root.title("Astros - Retro TV Scoreboard")
     # We'll fix window size for retro look
-    root.geometry("700x360")
+    root.geometry("700x400")
     canvas_ui = CanvasScoreboard(root)
     lifx_mgr = LifxManager()
     # optionally try a background discover to make sure lights are found
