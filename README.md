@@ -10,3 +10,12 @@ Canvas-based Astros scoreboard with MLB live API + LIFX effects.
 - Debug logging to console
 - LIFX effects: opponent score -> red single flash; end-of-game -> rainbow if ASTROS win,
   shades of red if opponent wins. All effects save/restore previous light state.
+
+TODO:
+- Create a setup icon and window to customize most aspects
+- Customizations planned:
+	* Home Team (Default)
+	* Font Colors
+	* LIFX Colors
+- Fix API interval counter
+- Change styling to better fit televised versions
