@@ -1,0 +1,53 @@
+{
+  "team_id": 147,
+  "teams": {
+    "Arizona Diamondbacks": 109,
+    "Atlanta Braves": 144,
+    "Baltimore Orioles": 110,
+    "Boston Red Sox": 111,
+    "Chicago White Sox": 145,
+    "Chicago Cubs": 112,
+    "Cincinnati Reds": 113,
+    "Cleveland Guardians": 114,
+    "Colorado Rockies": 115,
+    "Detroit Tigers": 117,
+    "Houston Astros": 117,
+    "Kansas City Royals": 118,
+    "Los Angeles Angels": 108,
+    "Los Angeles Dodgers": 119,
+    "Miami Marlins": 146,
+    "Milwaukee Brewers": 158,
+    "Minnesota Twins": 142,
+    "New York Yankees": 147,
+    "New York Mets": 121,
+    "Oakland Athletics": 133,
+    "Philadelphia Phillies": 143,
+    "Pittsburgh Pirates": 134,
+    "San Diego Padres": 135,
+    "San Francisco Giants": 137,
+    "Seattle Mariners": 136,
+    "St. Louis Cardinals": 138,
+    "Tampa Bay Rays": 139,
+    "Texas Rangers": 140,
+    "Toronto Blue Jays": 141,
+    "Washington Nationals": 120
+  },
+  "polling_intervals": {
+    "live": 15,
+    "scheduled": 300,
+    "none": 3600
+  },
+  "lookahead_days": 7,
+  "canvas": {
+    "width": 1000,
+    "height": 500,
+    "bg_color": "#000000",
+    "fg_color": "#FFFFFF",
+    "accent": "#FFD700",
+    "font_family": "Courier"
+  },
+  "ui": {
+    "max_innings": 9
+  },
+  "debug": true
+}
