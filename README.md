@@ -69,36 +69,8 @@ Example:
 * `polling_intervals`: Polling frequency in seconds
 * `lookahead_days`: Number of days ahead to fetch schedule
 
-## Future Improvements / Suggestions
-
-1. **Live Game Enhancements**
-
-   * Show pitch count for pitcher
-   * Display current batter stats (avg, OBP, HR, RBI)
-   * Show base runner names or positions
-
-2. **Visual Enhancements**
-
-   * Animations for B/S/O changes
-   * Highlight scoring plays
-   * Improved diamond graphics with colored bases
-
-3. **Additional Stats / Info**
-
-   * Team records, streaks, standings
-   * Game duration / start time countdown
-   * Weather or stadium info
-
-4. **UX Improvements**
-
-   * Resizeable canvas with responsive layout
-   * Keyboard shortcuts to switch teams
-   * Save and restore last viewed team
-
-5. **Backend Improvements**
-
-   * Caching API results to reduce network calls
-   * Better error handling for network failures
-   * Support multiple teams in one view
-
+### TODO
+* Do some code cleanup, dirty tricks were used ;p
+* Do some UI changes
+* Wait for the 2026 season
 ---
