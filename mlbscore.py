@@ -8,8 +8,9 @@ Features:
 - Polls StatsAPI at smart intervals (15s live, 300s scheduled, 3600s none)
 - Updates countdown footer every second
 - Diamond and balls/strikes/outs visualization
-- Home/away team rows stylized with team colors
-- Current batter & pitcher stats placeholders
+- Current batter and pitcher info
+- Home/Away rows stylized with team colors
+- Verbose debug logging with --debug
 """
 
 import tkinter as tk
@@ -33,45 +34,27 @@ DEFAULT_CONFIG = {
     "lookahead_days": 7,
     "canvas": {
         "width": 1000,
-        "height": 500,
+        "height": 600,
         "bg_color": "#000000",
         "fg_color": "#FFFFFF",
         "accent": "#FFD700",
         "font_family": "Courier"
     },
     "ui": {"max_innings": 9},
-    "debug": True
+    "debug": False
 }
 
-# Team colors: (darker_bg, lighter_fg)
+# Team colors (bg, fg)
 TEAM_COLORS = {
-    "Atlanta Braves": ("#13274f", "#ce1126"),
+    "Detroit Tigers": ("#003b5c", "#fa4616"),
+    "New York Yankees": ("#003b5c", "#e4002b"),
+    "Cleveland Guardians": ("#00385d", "#e31937"),
     "Boston Red Sox": ("#bd3039", "#0c2340"),
     "Chicago Cubs": ("#0e3386", "#cc3433"),
-    "Chicago White Sox": ("#000000", "#c4ced4"),
-    "Cincinnati Reds": ("#c6011f", "#0c2340"),
-    "Cleveland Guardians": ("#00385d", "#e31937"),
-    "Detroit Tigers": ("#003b5c", "#fa4616"),
-    "Houston Astros": ("#002d62", "#eb6e1f"),
-    "Kansas City Royals": ("#004687", "#f1be48"),
-    "Los Angeles Angels": ("#b81d29", "#003263"),
     "Los Angeles Dodgers": ("#005a8d", "#ef3e42"),
-    "Miami Marlins": ("#00a3e0", "#f6921e"),
-    "Milwaukee Brewers": ("#002f6c", "#b5a45f"),
-    "Minnesota Twins": ("#002b5c", "#de3c3f"),
-    "New York Mets": ("#002d72", "#ff5910"),
-    "New York Yankees": ("#003b5c", "#e4002b"),
-    "Oakland Athletics": ("#003831", "#f2f0a1"),
-    "Philadelphia Phillies": ("#e81828", "#002d62"),
-    "Pittsburgh Pirates": ("#27251f", "#fdb827"),
-    "San Diego Padres": ("#2f241d", "#ffc62f"),
+    "Houston Astros": ("#002d62", "#eb6e1f"),
     "San Francisco Giants": ("#fdba12", "#27251f"),
-    "Seattle Mariners": ("#005c5c", "#0c2c56"),
-    "St. Louis Cardinals": ("#c41e3a", "#0c2340"),
-    "Tampa Bay Rays": ("#092c5c", "#8fbce6"),
-    "Texas Rangers": ("#003278", "#c0111f"),
-    "Toronto Blue Jays": ("#134a8e", "#f5f5f5"),
-    "Washington Nationals": ("#123c5d", "#db3131"),
+    # … (add more as needed)
 }
 
 # -------------------------
@@ -142,11 +125,9 @@ def fetch_schedule(team_id=TEAM_ID, lookahead=LOOKAHEAD_DAYS):
     today = datetime.datetime.now(datetime.timezone.utc).date()
     start = today - datetime.timedelta(days=1)
     end = today + datetime.timedelta(days=lookahead)
-
     url = "https://statsapi.mlb.com/api/v1/schedule"
     params = {
-        "sportId": 1,
-        "teamId": team_id,
+        "sportId": 1, "teamId": team_id,
         "startDate": start.strftime("%Y-%m-%d"),
         "endDate": end.strftime("%Y-%m-%d"),
         "hydrate": "team,linescore"
@@ -159,7 +140,6 @@ def fetch_schedule(team_id=TEAM_ID, lookahead=LOOKAHEAD_DAYS):
         if DEBUG:
             print("[DEBUG] fetch_schedule error:", e)
         return []
-
     games = []
     for d in data.get("dates", []):
         for g in d.get("games", []):
@@ -167,7 +147,6 @@ def fetch_schedule(team_id=TEAM_ID, lookahead=LOOKAHEAD_DAYS):
             if gd:
                 g["gameDate_dt"] = gd
                 games.append(g)
-
     return sorted(games, key=lambda g: g["gameDate_dt"])
 
 def fetch_live_feed(gamePk):
@@ -198,16 +177,6 @@ def get_team_name(team_entry):
             return team_entry["teamName"]
     return str(team_entry)
 
-def get_player_stats(player):
-    if not player:
-        return "AVG: - OBP: - HR: - RBI: -"
-    stats = player.get("stats", {})
-    avg = stats.get("avg", "-")
-    obp = stats.get("obp", "-")
-    hr = stats.get("hr", "-")
-    rbi = stats.get("rbi", "-")
-    return f"AVG: {avg}  OBP: {obp}  HR: {hr}  RBI: {rbi}"
-
 # -------------------------
 # Scoreboard App
 # -------------------------
@@ -217,8 +186,6 @@ class ScoreboardApp:
         self.team_id = TEAM_ID
         self.polling = POLLING
         self.debug = DEBUG
-
-        # canvas
         self.width = CANVAS_CFG["width"]
         self.height = CANVAS_CFG["height"]
         self.bg = CANVAS_CFG["bg_color"]
@@ -239,16 +206,18 @@ class ScoreboardApp:
         self.last_game = None
         self.next_game = None
         self.live_feed = None
-
         self.poll_interval = POLLING["none"]
         self.next_update_in = 0
         self.running_fetch = False
 
         self.root.after(100, self.update_loop)
 
-    def log(self, *args):
-        if self.debug:
+    # Logging system
+    def log(self, *args, verbose=False):
+        if verbose and self.debug:
             print("[DEBUG]", *args)
+        elif not verbose:
+            print("[INFO]", *args)
 
     def render(self, full=True):
         if not full:
@@ -258,12 +227,12 @@ class ScoreboardApp:
             if self.next_game and "gameDate_dt" in self.next_game:
                 dt = self.next_game["gameDate_dt"].strftime("%Y-%m-%d %H:%M UTC")
                 footer += f" | Next: {get_team_name(self.next_game['teams']['away'])} @ {get_team_name(self.next_game['teams']['home'])} {dt}"
-            self.canvas.create_text(20, footer_y, text=footer, font=self.font_small,
-                                    fill=self.accent, anchor="w", tags="footer")
+            self.canvas.create_text(20, footer_y, text=footer,
+                                    font=self.font_small, fill=self.accent,
+                                    anchor="w", tags="footer")
             return
 
         self.canvas.delete("all")
-
         game = None
         linescore = {}
         if self.live_feed:
@@ -281,11 +250,10 @@ class ScoreboardApp:
 
         away = get_team_name(game.get("teams", {}).get("away", {}))
         home = get_team_name(game.get("teams", {}).get("home", {}))
-
         innings = linescore.get("innings", [])
         max_innings = max(len(innings), UI_CFG.get("max_innings", 9))
 
-        # Dynamic team column width
+        # Dynamic layout
         longest_name = max(len(away), len(home), len("TEAM"))
         char_width = self.font_team.measure("W")
         team_x = 100
@@ -294,86 +262,56 @@ class ScoreboardApp:
         y_start = 80
         y_step = 40
 
-        # Header row
-        self.canvas.create_text(team_x, y_start, text="TEAM", font=self.font_small, fill=self.accent, anchor="w")
+        # Header
+        self.canvas.create_text(team_x, y_start, text="TEAM",
+                                font=self.font_small, fill=self.accent, anchor="w")
         for i in range(max_innings):
-            self.canvas.create_text(score_start_x + i*col_width, y_start, text=str(i+1),
-                                    font=self.font_small, fill=self.accent)
+            self.canvas.create_text(score_start_x + i*col_width, y_start,
+                                    text=str(i+1), font=self.font_small, fill=self.accent)
         self.canvas.create_text(score_start_x + max_innings*col_width, y_start, text="R", font=self.font_small, fill=self.accent)
         self.canvas.create_text(score_start_x + (max_innings+1)*col_width, y_start, text="H", font=self.font_small, fill=self.accent)
         self.canvas.create_text(score_start_x + (max_innings+2)*col_width, y_start, text="E", font=self.font_small, fill=self.accent)
 
         # Away row
         y_away = y_start + y_step
-        self.canvas.create_text(team_x, y_away, text=away, font=self.font_team, fill=self.fg, anchor="w")
+        away_bg, away_fg = TEAM_COLORS.get(away, (self.bg, self.fg))
+        self.canvas.create_rectangle(team_x-5, y_away-15,
+                                     score_start_x+(max_innings+3)*col_width+5, y_away+15,
+                                     fill=away_bg, outline="")
+        self.canvas.create_text(team_x, y_away, text=away,
+                                font=self.font_team, fill=away_fg, anchor="w")
         for i in range(max_innings):
             run = "-"
             if i < len(innings) and "away" in innings[i]:
                 run = innings[i]["away"].get("runs", "-")
-            self.canvas.create_text(score_start_x + i*col_width, y_away, text=str(run), font=self.font_team, fill=self.fg)
-
+            self.canvas.create_text(score_start_x + i*col_width, y_away,
+                                    text=str(run), font=self.font_team, fill=away_fg)
         self.canvas.create_text(score_start_x + max_innings*col_width, y_away,
                                 text=str(linescore.get("teams", {}).get("away", {}).get("runs", "-")),
-                                font=self.font_team, fill=self.accent)
-        self.canvas.create_text(score_start_x + (max_innings+1)*col_width, y_away,
-                                text=str(linescore.get("teams", {}).get("away", {}).get("hits", "-")),
-                                font=self.font_team, fill=self.accent)
-        self.canvas.create_text(score_start_x + (max_innings+2)*col_width, y_away,
-                                text=str(linescore.get("teams", {}).get("away", {}).get("errors", "-")),
-                                font=self.font_team, fill=self.accent)
-
-        # Separator line between teams
-        self.canvas.create_line(team_x, y_start+y_step+20, score_start_x+(max_innings+3)*col_width, y_start+y_step+20, fill=self.accent)
+                                font=self.font_team, fill=away_fg)
 
         # Home row
         y_home = y_start + 2*y_step
-        home_bg, home_fg = TEAM_COLORS.get(home, (self.bg, self.accent))
-        away_bg, away_fg = TEAM_COLORS.get(away, (self.bg, self.accent))
-
-        # Away row background
-        self.canvas.create_rectangle(team_x-5, y_away-15, score_start_x+(max_innings+3)*col_width+5, y_away+15,
-                                     fill=away_bg, outline="")
-        self.canvas.create_text(team_x, y_away, text=away, font=self.font_team, fill=away_fg, anchor="w")
-        for i in range(max_innings):
-            run = "-"
-            if i < len(innings) and "away" in innings[i]:
-                run = innings[i]["away"].get("runs", "-")
-            self.canvas.create_text(score_start_x + i*col_width, y_away, text=str(run), font=self.font_team, fill=away_fg)
-        self.canvas.create_text(score_start_x + max_innings*col_width, y_away,
-                                text=str(linescore.get("teams", {}).get("away", {}).get("runs", "-")),
-                                font=self.font_team, fill=away_fg)
-        self.canvas.create_text(score_start_x + (max_innings+1)*col_width, y_away,
-                                text=str(linescore.get("teams", {}).get("away", {}).get("hits", "-")),
-                                font=self.font_team, fill=away_fg)
-        self.canvas.create_text(score_start_x + (max_innings+2)*col_width, y_away,
-                                text=str(linescore.get("teams", {}).get("away", {}).get("errors", "-")),
-                                font=self.font_team, fill=away_fg)
-
-        # Home row background
-        self.canvas.create_rectangle(team_x-5, y_home-15, score_start_x+(max_innings+3)*col_width+5, y_home+15,
+        home_bg, home_fg = TEAM_COLORS.get(home, (self.bg, self.fg))
+        self.canvas.create_rectangle(team_x-5, y_home-15,
+                                     score_start_x+(max_innings+3)*col_width+5, y_home+15,
                                      fill=home_bg, outline="")
-        self.canvas.create_text(team_x, y_home, text=home, font=self.font_team, fill=home_fg, anchor="w")
+        self.canvas.create_text(team_x, y_home, text=home,
+                                font=self.font_team, fill=home_fg, anchor="w")
         for i in range(max_innings):
             run = "-"
             if i < len(innings) and "home" in innings[i]:
                 run = innings[i]["home"].get("runs", "-")
-            self.canvas.create_text(score_start_x + i*col_width, y_home, text=str(run), font=self.font_team, fill=home_fg)
+            self.canvas.create_text(score_start_x + i*col_width, y_home,
+                                    text=str(run), font=self.font_team, fill=home_fg)
         self.canvas.create_text(score_start_x + max_innings*col_width, y_home,
                                 text=str(linescore.get("teams", {}).get("home", {}).get("runs", "-")),
                                 font=self.font_team, fill=home_fg)
-        self.canvas.create_text(score_start_x + (max_innings+1)*col_width, y_home,
-                                text=str(linescore.get("teams", {}).get("home", {}).get("hits", "-")),
-                                font=self.font_team, fill=home_fg)
-        self.canvas.create_text(score_start_x + (max_innings+2)*col_width, y_home,
-                                text=str(linescore.get("teams", {}).get("home", {}).get("errors", "-")),
-                                font=self.font_team, fill=home_fg)
 
-        # Diamond and B/S/O (centered between scoreboard and footer)
+        # Diamond
         diamond_center_x = self.width // 2
-        diamond_center_y = y_home + y_step + 10
+        diamond_center_y = y_home + y_step + 20
         diamond_size = 20
-
-        # Draw diamond shape
         self.canvas.create_polygon(
             diamond_center_x, diamond_center_y - diamond_size,
             diamond_center_x + diamond_size, diamond_center_y,
@@ -382,7 +320,7 @@ class ScoreboardApp:
             outline=self.accent, fill="", width=2
         )
 
-        # Balls, Strikes, Outs
+        # Balls/Strikes/Outs
         bso_text = "B: -  S: -  O: -"
         if self.live_feed:
             counts = self.live_feed.get("liveData", {}).get("plays", {}).get("currentPlay", {}).get("count", {})
@@ -390,33 +328,37 @@ class ScoreboardApp:
             strikes = counts.get("strikes", "-")
             outs = self.live_feed.get("liveData", {}).get("linescore", {}).get("outs", "-")
             bso_text = f"B: {balls}  S: {strikes}  O: {outs}"
-        self.canvas.create_text(diamond_center_x, diamond_center_y + 40, text=bso_text,
-                                font=self.font_status, fill=self.accent)
+            self.log("B/S/O counts:", bso_text, verbose=True)
+        self.canvas.create_text(diamond_center_x, diamond_center_y+40,
+                                text=bso_text, font=self.font_status, fill=self.accent)
 
-        # Current batter & pitcher placeholders
-        batter_text = "Batter: - | AVG: -  OBP: -  HR: -  RBI: -"
-        pitcher_text = "Pitcher: - | ERA: -  WHIP: -  P: -"
+        # Batter / Pitcher info
+        batter_text = "Batter: -"
+        pitcher_text = "Pitcher: -"
         if self.live_feed:
-            batter = self.live_feed.get("liveData", {}).get("plays", {}).get("currentPlay", {}).get("matchup", {}).get("batter", {})
-            pitcher = self.live_feed.get("liveData", {}).get("plays", {}).get("currentPlay", {}).get("matchup", {}).get("pitcher", {})
-            batter_text = f"Batter: {batter.get('fullName','-')} | {get_player_stats(batter)}"
-            pitcher_text = f"Pitcher: {pitcher.get('fullName','-')} | {get_player_stats(pitcher)}"
-        self.canvas.create_text(diamond_center_x, diamond_center_y + 60, text=batter_text,
-                                font=self.font_small, fill=self.accent)
-        self.canvas.create_text(diamond_center_x, diamond_center_y + 80, text=pitcher_text,
-                                font=self.font_small, fill=self.accent)
+            currentPlay = self.live_feed.get("liveData", {}).get("plays", {}).get("currentPlay", {})
+            matchup = currentPlay.get("matchup", {})
+            batter = matchup.get("batter", {}).get("fullName")
+            pitcher = matchup.get("pitcher", {}).get("fullName")
+            if batter:
+                batter_text = f"Batter: {batter}"
+            if pitcher:
+                pitcher_text = f"Pitcher: {pitcher}"
+            self.log("Matchup data:", batter_text, pitcher_text, verbose=True)
 
-        # Footer
+        self.canvas.create_text(self.width//2, diamond_center_y+70,
+                                text=batter_text, font=self.font_small, fill=self.fg)
+        self.canvas.create_text(self.width//2, diamond_center_y+90,
+                                text=pitcher_text, font=self.font_small, fill=self.fg)
+
         self.render(full=False)
 
     def update_loop(self):
         if self.next_update_in <= 0 and not self.running_fetch:
             t = threading.Thread(target=self.fetch_and_schedule, daemon=True)
             t.start()
-
         if self.next_update_in > 0:
             self.next_update_in -= 1
-
         self.render(full=False)
         self.root.after(1000, self.update_loop)
 
@@ -425,10 +367,8 @@ class ScoreboardApp:
         try:
             games = fetch_schedule(self.team_id)
             self.games = games
-
             now = datetime.datetime.now(datetime.timezone.utc)
             live, last, nxt = None, None, None
-
             for g in games:
                 gd = g["gameDate_dt"]
                 state = g["status"]["detailedState"]
@@ -438,21 +378,22 @@ class ScoreboardApp:
                     nxt = g
                 if state == "In Progress":
                     live = g
-
             self.last_game = last
             self.next_game = nxt
             self.live_feed = fetch_live_feed(live["gamePk"]) if live else None
-
             if live:
                 self.poll_interval = POLLING["live"]
+                self.log(f"Game in progress, next poll in {self.poll_interval}s")
             elif last:
                 self.poll_interval = POLLING["none"]
+                self.log("No live game, showing last result")
             elif nxt:
                 self.last_game = nxt
                 self.poll_interval = POLLING["scheduled"]
+                self.log(f"No live game, next scheduled game at {nxt['gameDate']}")
             else:
                 self.poll_interval = POLLING["none"]
-
+                self.log("No games found")
             self.next_update_in = self.poll_interval
             self.render(full=True)
         finally:
