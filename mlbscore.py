@@ -97,7 +97,7 @@ def make_session():
                   status_forcelist=(429, 500, 502, 503, 504),
                   allowed_methods=frozenset(['GET']))
     s.mount("https://", HTTPAdapter(max_retries=retry))
-    s.headers.update({"User-Agent": "mlbscore-patched/1.0"})
+    s.headers.update({"User-Agent": "mlbscore/1.1"})
     return s
 
 def parse_iso_to_local(dtstr):
