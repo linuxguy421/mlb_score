@@ -49,5 +49,5 @@
   "ui": {
     "max_innings": 9
   },
-  "debug": true
+  "debug": false
 }
