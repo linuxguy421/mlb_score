@@ -2,75 +2,72 @@
 
 ## Overview
 
-`mlbscore.py` is a classic TV-style MLB scoreboard implemented in Python using Tkinter. It displays live, last, and upcoming game information for a specified MLB team, including:
+`mlbscore.py` is a classic TV-style MLB scoreboard implemented in Python using Tkinter. It is designed to display live, final, and upcoming game information for a specified MLB team with a minimalist, dynamic UI.
 
-* Inning-by-inning scoreboard with R/H/E
-* Diamond with balls, strikes, and outs visualization
-* Current batter and pitcher stats (placeholder display if no live game)
-* Countdown to next update
-* Dynamic polling intervals depending on game status
-* Team row colorization based on official team colors
+**This version (v5) features improved thread management, a fully working in-game status logic, and refined visuals.**
 
-## Features
+---
 
-* Reads configuration from `config.json`
-* Supports specifying a team via CLI (`--team`) or config
-* Automatically adjusts polling frequency:
+## Key Features
 
-  * Live game: 15s
-  * Scheduled game: 300s
-  * No game: 3600s
-* Canvas-based UI with dynamic sizing
-* Visual enhancements:
+* **Clean Inning Highlight:** The active inning header and score cells are subtly highlighted using a blend of the team's accent color.
+* **Real-time B/S/O Logic:** Balls, Strikes, and Outs accurately update. Bases and counts immediately reset once a third out is detected, avoiding visual lag.
+* **Runner Animation:** Bases fill and runners move visually between bases upon significant in-game events.
+* **Robust Threading:** Network calls are managed using a `ThreadPoolExecutor` to keep the UI responsive, preventing the "Not Responding" state during network lag.
+* **Dynamic Polling:** Automatically adjusts the polling frequency based on game status:
+    * **Live Game:** 15s
+    * **Scheduled Game:** 300s
+    * **No Game:** 3600s
+* **Customizable UI:** All colors, fonts, and dimensions are configured via `config.json`.
+* **Visual Elements:**
+    * Inning-by-inning scoreboard with R/H/E totals.
+    * Diamond visualization with B/S/O dots.
+    * Current batter and pitcher names.
+    * Batter icon (⚾) marking the team currently at bat.
 
-  * Team-specific row colors
-  * Diamond and B/S/O visualization
-  * Footer showing next update and upcoming game info
+---
 
 ## Installation
 
-1. Ensure Python 3.13+ is installed.
-2. Install dependencies:
+1.  **Ensure Python is installed.** Python 3.10 or newer is recommended.
+2.  **Install dependencies:** This project requires the `requests` library.
 
-   ```bash
-   pip install requests
-   ```
-3. Download `mlbscore.py` and `config.json` (optional).
+    ```bash
+    pip install requests
+    ```
+3.  **Download** `mlbscore.py` and `config.json` to your local machine.
 
-## Usage
-
-```bash
-python mlbscore.py --config config.json --team "New York Yankees" --debug
-```
-
-### CLI Options
-
-* `--config`: Path to `config.json` (default `config.json`)
-* `--team`: Team name to override `team_id` in config
-* `--debug`: Enable debug logging
+---
 
 ## Configuration (`config.json`)
 
-Example:
+The primary configuration file allows you to customize the team being followed, colors, and polling intervals.
+
+**Example `config.json`:**
 
 ```json
 {
-  "team_id": 147,
+  "team_id": 119,
   "teams": {
-    "New York Yankees": 147
+    "Los Angeles Dodgers": 119,
+    "New York Yankees": 147 
   },
-  "polling_intervals": {"live": 15, "scheduled": 300, "none": 3600},
-  "lookahead_days": 7
+  "polling_intervals": {
+    "live": 15,
+    "scheduled": 300,
+    "none": 3600
+  },
+  "lookahead_days": 7,
+  "canvas": {
+    "width": 1000,
+    "height": 500,
+    "bg_color": "#0b162a",
+    "fg_color": "#eaeaea",
+    "accent": "#FFD700",
+    "font_family": "Courier"
+  },
+  "ui": {
+    "max_innings": 9
+  },
+  "debug": false
 }
-```
-
-* `team_id`: MLB team ID
-* `teams`: Mapping of team names to IDs
-* `polling_intervals`: Polling frequency in seconds
-* `lookahead_days`: Number of days ahead to fetch schedule
-
-### TODO
-* Do some code cleanup, dirty tricks were used ;p
-* Do some UI changes
-* Wait for the 2026 season
----
