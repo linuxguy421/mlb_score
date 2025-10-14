@@ -32,6 +32,128 @@
     "Toronto Blue Jays": 141,
     "Washington Nationals": 120
   },
+  "team_colors": {
+    "Arizona Diamondbacks": {
+      "primary": "#A71930",
+      "accent": "#E3D4AD"
+    },
+    "Atlanta Braves": {
+      "primary": "#13274F",
+      "accent": "#CE1141"
+    },
+    "Baltimore Orioles": {
+      "primary": "#000000",
+      "accent": "#DF4601"
+    },
+    "Boston Red Sox": {
+      "primary": "#BD3039",
+      "accent": "#192C55"
+    },
+    "Chicago Cubs": {
+      "primary": "#0E3386",
+      "accent": "#CC3433"
+    },
+    "Chicago White Sox": {
+      "primary": "#000000",
+      "accent": "#C4CED4"
+    },
+    "Cincinnati Reds": {
+      "primary": "#C6011F",
+      "accent": "#000000"
+    },
+    "Cleveland Guardians": {
+      "primary": "#00385D",
+      "accent": "#E50022"
+    },
+    "Colorado Rockies": {
+      "primary": "#33006F",
+      "accent": "#C4CED4"
+    },
+    "Detroit Tigers": {
+      "primary": "#0C2340",
+      "accent": "#F26722"
+    },
+    "Houston Astros": {
+      "primary": "#002D62",
+      "accent": "#EB6E1F"
+    },
+    "Kansas City Royals": {
+      "primary": "#174885",
+      "accent": "#C0995A"
+    },
+    "Los Angeles Angels": {
+      "primary": "#BA0021",
+      "accent": "#C4CED4"
+    },
+    "Los Angeles Dodgers": {
+      "primary": "#005A9C",
+      "accent": "#EF3E42"
+    },
+    "Miami Marlins": {
+      "primary": "#000000",
+      "accent": "#0077C8"
+    },
+    "Milwaukee Brewers": {
+      "primary": "#0A2351",
+      "accent": "#B6922E"
+    },
+    "Minnesota Twins": {
+      "primary": "#002B5C",
+      "accent": "#D31145"
+    },
+    "New York Mets": {
+      "primary": "#002D72",
+      "accent": "#FF5910"
+    },
+    "New York Yankees": {
+      "primary": "#132448",
+      "accent": "#C4CED3"
+    },
+    "Oakland Athletics": {
+      "primary": "#003831",
+      "accent": "#EFB21E"
+    },
+    "Philadelphia Phillies": {
+      "primary": "#284898",
+      "accent": "#E81828"
+    },
+    "Pittsburgh Pirates": {
+      "primary": "#000000",
+      "accent": "#FDB827"
+    },
+    "San Diego Padres": {
+      "primary": "#002D62",
+      "accent": "#C0995A"
+    },
+    "San Francisco Giants": {
+      "primary": "#000000",
+      "accent": "#FD5A1E"
+    },
+    "Seattle Mariners": {
+      "primary": "#0C2C56",
+      "accent": "#005C5C"
+    },
+    "St. Louis Cardinals": {
+      "primary": "#C41E3A",
+      "accent": "#22205F"
+    },
+    "Tampa Bay Rays": {
+      "primary": "#092C5C",
+      "accent": "#8FBCE6"
+    },
+    "Texas Rangers": {
+      "primary": "#003278",
+      "accent": "#C0111F"
+    },
+    "Toronto Blue Jays": {
+      "primary": "#134A8E",
+      "accent": "#E2231A"
+    },
+    "Washington Nationals": {
+      "primary": "#AB0003",
+      "accent": "#14225A"
+    }
+  },
   "polling_intervals": {
     "live": 15,
     "scheduled": 300,
