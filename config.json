@@ -163,10 +163,10 @@
   "canvas": {
     "width": 1000,
     "height": 500,
-    "bg_color": "#000000",
+    "bg_color": "#121212",
     "fg_color": "#FFFFFF",
-    "accent": "#FFD700",
-    "font_family": "Courier"
+    "accent": "#54B0FF",
+    "font_family": "Helvetica"
   },
   "ui": {
     "max_innings": 9
