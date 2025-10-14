@@ -42,6 +42,9 @@
 ## Configuration (`config.json`)
 
 The primary configuration file allows you to customize the team being followed, colors, and polling intervals.
+Note: It is *NOT* recommended to poll less than 15 seconds, this may result
+in your IP being banned, as the MLB API is undocumented and intended for
+private use.
 
 **Example `config.json`:**
 
