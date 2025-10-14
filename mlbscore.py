@@ -11,6 +11,7 @@ Features:
 - Immediately resets bases, balls, strikes, outs once a 3rd out is detected (single-trigger per inning/half).
 - Keeps all visuals, runner animations, grid, and at-bat ⚾ icon.
 - Throttled debug logging (only on state change or important events).
+- NOW INCLUDES: Clean Inning Highlight logic.
 """
 
 import tkinter as tk
@@ -463,6 +464,12 @@ class ScoreboardApp:
             self.canvas.create_text(self.width // 2, self.height - 20,
                                     text=footer, font=self.font_small, fill=self.accent, tags="footer")
             return
+            
+        # Get current inning index for highlighting
+        active_inning_idx = -1
+        if self.live_feed:
+            ls = self.live_feed.get("liveData", {}).get("linescore", {}) or {}
+            active_inning_idx = ls.get("currentInning", 0) - 1
 
         away = get_team_name(game_src.get("teams", {}).get("away", {}))
         home = get_team_name(game_src.get("teams", {}).get("home", {}))
@@ -487,10 +494,12 @@ class ScoreboardApp:
         # inning header cells
         for i in range(max_innings):
             x_center = score_start_x + i * col_width
+            bg_fill = blend_colors(self.accent, self.bg, 0.9) if i == active_inning_idx else self.bg
+            text_fill = self.fg if i == active_inning_idx else self.accent
             self.canvas.create_rectangle(x_center - col_width // 2, top_margin - 18,
                                          x_center + col_width // 2, top_margin + 18,
-                                         fill=self.bg, outline="black")
-            self.canvas.create_text(x_center, top_margin, text=str(i + 1), font=self.font_header, fill=self.accent)
+                                         fill=bg_fill, outline="black")
+            self.canvas.create_text(x_center, top_margin, text=str(i + 1), font=self.font_header, fill=text_fill)
 
         # totals headers: R, H, E, extra (bat icon column)
         totals_labels = ("R", "H", "E", "🦇")
@@ -506,7 +515,7 @@ class ScoreboardApp:
                 self.canvas.create_text(x_center, top_margin, text=" ", font=self.font_header, fill=self.accent)
 
         # draw team rows (colored) and per-inning values
-        def draw_team_row(y, name, side):
+        def draw_team_row(y, name, side, active_idx):
             bg_col, fg_col = team_color_for(name)
             self.canvas.create_rectangle(team_x - 8, y - 18, score_start_x - 4, y + 18, fill=bg_col, outline="black")
             self.canvas.create_text(team_x, y, text=name, font=self.font_team, fill=fg_col, anchor="w")
@@ -520,7 +529,8 @@ class ScoreboardApp:
                         run_val = inning["home"].get("runs", "-")
                 x1 = score_start_x + i * col_width - col_width // 2
                 x2 = score_start_x + i * col_width + col_width // 2
-                self.canvas.create_rectangle(x1, y - 18, x2, y + 18, fill=bg_col, outline="black")
+                cell_bg = blend_colors(bg_col, self.accent, 0.25) if i == active_idx else bg_col
+                self.canvas.create_rectangle(x1, y - 18, x2, y + 18, fill=cell_bg, outline="black")
                 self.canvas.create_text(score_start_x + i * col_width, y, text=str(run_val), font=self.font_team,
                                         fill=fg_col)
             totals = linescore.get("teams", {}).get(side, {})
@@ -537,8 +547,8 @@ class ScoreboardApp:
 
         y_away = top_margin + row_height
         y_home = y_away + row_height
-        draw_team_row(y_away, away, "away")
-        draw_team_row(y_home, home, "home")
+        draw_team_row(y_away, away, "away", active_inning_idx)
+        draw_team_row(y_home, home, "home", active_inning_idx)
 
         # --- Clean, properly aligned grid overlay ---
         grid_left = team_x - 8
