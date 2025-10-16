@@ -1,5 +1,5 @@
 {
-  "team_id": 119,
+  "team_id": 141,
   "teams": {
     "Arizona Diamondbacks": 109,
     "Atlanta Braves": 144,
@@ -171,5 +171,5 @@
   "ui": {
     "max_innings": 9
   },
-  "debug": false
+  "debug": true
 }

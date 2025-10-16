@@ -1,76 +1,67 @@
-# MLB Canvas Scoreboard
-
-## Overview
-
-`mlbscore.py` is a classic TV-style MLB scoreboard implemented in Python using Tkinter. It is designed to display live, final, and upcoming game information for a specified MLB team with a minimalist, dynamic UI.
-
-**This version (v5) features improved thread management, a fully working in-game status logic, and refined visuals.**
-
----
-
-## Key Features
-
-* **Clean Inning Highlight:** The active inning header and score cells are subtly highlighted using a blend of the team's accent color.
-* **Real-time B/S/O Logic:** Balls, Strikes, and Outs accurately update. Bases and counts immediately reset once a third out is detected, avoiding visual lag.
-* **Runner Animation:** Bases fill and runners move visually between bases upon significant in-game events.
-* **Robust Threading:** Network calls are managed using a `ThreadPoolExecutor` to keep the UI responsive, preventing the "Not Responding" state during network lag.
-* **Dynamic Polling:** Automatically adjusts the polling frequency based on game status:
-    * **Live Game:** 15s
-    * **Scheduled Game:** 300s
-    * **No Game:** 3600s
-* **Customizable UI:** All colors, fonts, and dimensions are configured via `config.json`.
-* **Visual Elements:**
-    * Inning-by-inning scoreboard with R/H/E totals.
-    * Diamond visualization with B/S/O dots.
-    * Current batter and pitcher names.
-    * Batter icon (⚾) marking the team currently at bat.
-
----
-
-## Installation
-
-1.  **Ensure Python is installed.** Python 3.10 or newer is recommended.
-2.  **Install dependencies:** This project requires the `requests` library.
-
-    ```bash
-    pip install requests
-    ```
-3.  **Download** `mlbscore.py` and `config.json` to your local machine.
-
----
-
-## Configuration (`config.json`)
-
-The primary configuration file allows you to customize the team being followed, colors, and polling intervals.
-Note: It is *NOT* recommended to poll less than 15 seconds, this may result
-in your IP being banned, as the MLB API is undocumented and intended for
-private use.
-
-**Example `config.json`:**
-
-```json
-{
-  "team_id": 119,
-  "teams": {
-    "Los Angeles Dodgers": 119,
-    "New York Yankees": 147 
-  },
-  "polling_intervals": {
-    "live": 15,
-    "scheduled": 300,
-    "none": 3600
-  },
-  "lookahead_days": 7,
-  "canvas": {
-    "width": 1000,
-    "height": 500,
-    "bg_color": "#0b162a",
-    "fg_color": "#eaeaea",
-    "accent": "#FFD700",
-    "font_family": "Courier"
-  },
-  "ui": {
-    "max_innings": 9
-  },
-  "debug": false
-}
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,50 @@
++# MLB Canvas Scoreboard (mlbscore.py)
++
++A Python application using **Tkinter** to display a real-time or scheduled MLB scoreboard for a followed team.
++
++---
++
++## Features
++
++This script implements the "final v5" features, ensuring a stable and streamlined scoreboard:
++
++* **Fixed Issues:** Addresses syntax and logic errors from previous versions.
++* **Thread Safety:** Improved network calls using `ThreadPoolExecutor` to prevent GUI lockup.
++* **Real-time Updates:** Ensures all GUI updates are correctly scheduled on the main Tkinter thread.
++* **Base/Runner Logic:** Streamlined base occupancy and runner movement logic.
++* **Configuration:** Uses `config.json` for persistent settings (team ID, colors, polling intervals).
++* **Visuals:**
++    * Only displays a maximum of **two out circles**.
++    * Immediate reset of bases, balls, strikes, and outs upon detecting a **3rd out**.
++    * Includes all base/runner visuals, animations, grid overlay, and the at-bat '⚾' icon.
++* **Polling:** Automatically adjusts the network polling interval based on game state (Live, Scheduled, None).
++
++---
++
++## Installation & Setup
++
++1.  **Dependencies:** Ensure you have Python 3 and the required libraries:
++    ```bash
++    pip install requests urllib3
++    ```
++
++2.  **Configuration:** Create a `config.json` file in the same directory. A minimal example:
++    ```json
++    {
++        "team_id": 117,
++        "teams": {
++            "Cubs": 161,
++            "Phillies": 143,
++            "Followed Team": 117
++        },
++        "team_colors": {
++            "Followed Team": {"primary": "#002D56", "accent": "#C41E3A"}
++        },
++        "ui": {"max_innings": 9},
++        "debug": false
++    }
++    ```
++    *Note: The `team_id` is the default, but you can override it using `--team` on the command line.*
++
++3.  **Run:** Execute the script from your terminal:
++    ```bash
++    python3 mlbscore.py
++    ```
++    You can specify a team or enable debug mode:
++    ```bash
++    python3 mlbscore.py --team "Cubs" --debug
++    ```
++
++---
++
++## Status Indicators
++
++* **🔴 LIVE:** A red circle and "LIVE" text appears in the footer when a game is in progress.
++* **Footer:** Displays the next scheduled game and the time until the next data poll.
++* **BSO:** Balls, Strikes, and Outs are tracked to the right of the diamond.

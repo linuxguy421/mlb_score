@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-mlbscore_final_v5.py — Corrected and Streamlined Scoreboard
+mlbscore_final_v8.py — Corrected and Streamlined Scoreboard
 Features:
-- Fixed SyntaxError (line 757)
 - Improved thread safety using ThreadPoolExecutor for network calls.
 - Ensures all GUI updates are scheduled on the main Tkinter thread.
 - Streamlined base/runner logic.
@@ -11,7 +10,9 @@ Features:
 - Immediately resets bases, balls, strikes, outs once a 3rd out is detected (single-trigger per inning/half).
 - Keeps all visuals, runner animations, grid, and at-bat ⚾ icon.
 - Throttled debug logging (only on state change or important events).
-- NOW INCLUDES: Clean Inning Highlight logic.
+- Includes Clean Inning Highlight logic.
+- NEW: Smart Polling Logic to efficiently wait for the next scheduled game (triggers 1 hour before start).
+- NEW: Countdown timer display format: $days, HH:MM:SS.
 """
 
 import tkinter as tk
@@ -53,7 +54,7 @@ DEFAULT_CONFIG = {
 # -------------------------
 # CLI
 # -------------------------
-parser = argparse.ArgumentParser(description="MLB Canvas Scoreboard (final v5)")
+parser = argparse.ArgumentParser(description="MLB Canvas Scoreboard (final v8)")
 parser.add_argument("--config", default="config.json", help="Path to config.json")
 parser.add_argument("--team", help="Team name (overrides config team_id if found)")
 parser.add_argument("--debug", action="store_true", help="Enable debug logging (overrides config)")
@@ -104,14 +105,14 @@ def make_session():
                   status_forcelist=(429, 500, 502, 503, 504),
                   allowed_methods=frozenset(['GET']))
     s.mount("https://", HTTPAdapter(max_retries=retry))
-    s.headers.update({"User-Agent": "mlbscore-final-v5/1.0"})
+    s.headers.update({"User-Agent": "mlbscore-final-v8/1.0"})
     return s
 
 def parse_iso_to_local(dtstr):
     if not dtstr:
         return None
     try:
-        # NEW: Using fromisoformat handles 'Z' implicitly with +00:00 replacement logic.
+        # Using fromisoformat handles 'Z' implicitly with +00:00 replacement logic.
         dt = datetime.datetime.fromisoformat(dtstr.replace("Z", "+00:00"))
         return dt.astimezone()
     except Exception:
@@ -119,7 +120,7 @@ def parse_iso_to_local(dtstr):
 
 def fetch_schedule(team_id=TEAM_ID, lookahead=LOOKAHEAD_DAYS):
     sess = make_session()
-    # NEW: Use date.today() for simplicity
+    # Use date.today() for simplicity
     today = datetime.date.today()
     start = today - datetime.timedelta(days=1)
     end = today + datetime.timedelta(days=lookahead)
@@ -152,7 +153,7 @@ def fetch_live_feed(gamePk):
     if not gamePk:
         return None
     sess = make_session()
-    # NEW: Using f-string for URL
+    # Using f-string for URL
     url = f"https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
     try:
         r = sess.get(url, timeout=12)
@@ -183,7 +184,7 @@ def team_color_for(name):
         prim = tc.get("primary", CANVAS_CFG.get("bg_color", "#000000"))
         acc = tc.get("accent", CANVAS_CFG.get("accent", "#FFFFFF"))
         return (prim, acc)
-    # NEW: Case-insensitive fallback lookup
+    # Case-insensitive fallback lookup
     for k, v in TEAM_COLORS.items():
         if k.lower() == name.lower() and isinstance(v, dict):
             return (v.get("primary", CANVAS_CFG.get("bg_color")), v.get("accent", CANVAS_CFG.get("accent")))
@@ -196,7 +197,7 @@ def hex_to_rgb(hex_color):
 def rgb_to_hex(rgb):
     return "#{:02x}{:02x}{:02x}".format(*[max(0, min(255, int(x))) for x in rgb])
 
-# NEW: Simplified color blend
+# Simplified color blend
 def blend_colors(c1, c2, t):
     rgb1 = hex_to_rgb(c1)
     rgb2 = hex_to_rgb(c2)
@@ -236,7 +237,7 @@ class ScoreboardApp:
         self.font_small = tkfont.Font(family=self.font_family, size=10)
         self.font_status = tkfont.Font(family=self.font_family, size=12, weight="bold")
 
-        # NEW: ThreadPoolExecutor for network operations
+        # ThreadPoolExecutor for network operations
         self.executor = ThreadPoolExecutor(max_workers=1)
 
         # state
@@ -247,7 +248,6 @@ class ScoreboardApp:
         self.live_feed = None
         self.poll_interval = self.polling.get("none", 3600)
         self.next_update_in = 0
-        # self.running_fetch is no longer strictly needed but kept for internal logic check
         self.running_fetch = False
 
         # base state
@@ -307,18 +307,18 @@ class ScoreboardApp:
                 return
             print("[DEBUG]", *args)
         else:
-            # NEW: Using f-string for error logging
+            # Using f-string for error logging
             if level and str(level).lower() == "error":
                 print(f"[ERROR]", *args)
                 return
             if self.debug:
-                # NEW: Using f-string for info logging
+                # Using f-string for info logging
                 print(f"[{str(level).upper()}]", *args)
 
     # runner helpers
     def compute_base_positions(self):
         ds = self.diamond_ds or 120
-        # NEW: Improved default positioning for robustness
+        # Improved default positioning for robustness
         cx = self.diamond_cx or (self.left_margin + 180)
         cy = self.diamond_cy or (self.top_margin + 300)
         inset = ds * 0.6
@@ -348,7 +348,7 @@ class ScoreboardApp:
         self.log(f"Runner spawned: {rkey} at {base_key}", verbose=True)
         return rkey
 
-    # NEW: Modified to always remove from runners_by_base if present
+    # Modified to always remove from runners_by_base if present
     def move_runner_base(self, from_base, to_base, steps=12):
         rkey = self.runners_by_base.pop(from_base, None)
         runner = self.runners.get(rkey)
@@ -416,7 +416,7 @@ class ScoreboardApp:
                 self.canvas.move(temp_cid, dx, dy)
             except Exception:
                 pass
-            # NEW: Always schedule GUI updates using self.root.after in animation
+            # Always schedule GUI updates using self.root.after in animation
             self.root.after(30, lambda: _step(i + 1))
 
         _step()
@@ -436,12 +436,25 @@ class ScoreboardApp:
         """Wrapper to ensure full render is called on the main thread."""
         self.render(full=True)
 
+    def format_seconds_to_dhms_string(self, seconds):
+        """Formats an integer number of seconds into '$days, HH:MM:SS' string."""
+        seconds = int(seconds)
+        if seconds <= 0:
+            return "00:00:00"
+
+        td = datetime.timedelta(seconds=seconds)
+        hours = td.seconds // 3600
+        minutes = (td.seconds % 3600) // 60
+        secs = td.seconds % 60
+        time_part = f"{hours:02}:{minutes:02}:{secs:02}"
+        return f"{td.days}d, {time_part}" if td.days > 0 else time_part
+
     # rendering
     def render(self, full=True):
         if full:
             self.canvas.delete("all")
         else:
-            # NEW: Using specific tag for footer
+            # Using specific tag for footer
             self.canvas.delete("footer")
 
         game_src = None
@@ -460,7 +473,8 @@ class ScoreboardApp:
             msg = f"Waiting for game data for {self.followed_team_name}"
             self.canvas.create_text(self.width // 2, self.height // 2,
                                     text=msg, font=self.font_title, fill=self.fg)
-            footer = f"{msg} | Next update in: {self.next_update_in}s"
+            time_display = self.format_seconds_to_dhms_string(self.next_update_in)
+            footer = f"{msg} | Next update in: {time_display}"
             self.canvas.create_text(self.width // 2, self.height - 20,
                                     text=footer, font=self.font_small, fill=self.accent, tags="footer")
             return
@@ -502,17 +516,13 @@ class ScoreboardApp:
             self.canvas.create_text(x_center, top_margin, text=str(i + 1), font=self.font_header, fill=text_fill)
 
         # totals headers: R, H, E, extra (bat icon column)
-        totals_labels = ("R", "H", "E", "🦇")
+        totals_labels = ("R", "H", "E", "⚾")
         for j, label in enumerate(totals_labels):
             x_center = score_start_x + (max_innings + j) * col_width
             self.canvas.create_rectangle(x_center - col_width // 2, top_margin - 18,
                                          x_center + col_width // 2, top_margin + 18,
                                          fill=self.bg, outline="black")
-            if label:
-                self.canvas.create_text(x_center, top_margin, text=label, font=self.font_header, fill=self.accent)
-            else:
-                # leave header blank for icon column
-                self.canvas.create_text(x_center, top_margin, text=" ", font=self.font_header, fill=self.accent)
+            self.canvas.create_text(x_center, top_margin, text=label if label != "⚾" else "🦇", font=self.font_header, fill=self.accent)
 
         # draw team rows (colored) and per-inning values
         def draw_team_row(y, name, side, active_idx):
@@ -588,7 +598,7 @@ class ScoreboardApp:
             if anim:
                 fill = anim.get("current", self.empty_base_fill)
             else:
-                # NEW: Use runners_by_base to determine base fill color
+                # Use runners_by_base to determine base fill color
                 if bname in self.runners_by_base:
                     rkey = self.runners_by_base.get(bname)
                     r_info = self.runners.get(rkey)
@@ -677,7 +687,7 @@ class ScoreboardApp:
                 outs = 0
                 self._inning_reset_done = True
             else:
-                # NEW: Cleaned up BSO assignment to max/min
+                # Cleaned up BSO assignment to max/min
                 balls = max(0, min(3, raw_balls))
                 strikes = max(0, min(2, raw_strikes))
                 outs = max(0, min(2, raw_outs))
@@ -757,6 +767,10 @@ class ScoreboardApp:
         footer_y = self.height - 24
         footer_text = ""
         is_live_now = False
+        
+        # Format the time display for the footer
+        time_display = self.format_seconds_to_dhms_string(self.next_update_in)
+        
         if self.live_feed:
             state = self.live_feed.get("gameData", {}).get("status", {}).get("detailedState", "") or ""
             if "In Progress" in state or "Live" in state:
@@ -767,21 +781,20 @@ class ScoreboardApp:
             cy = footer_y
             self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="red", outline="")
             self.canvas.create_text(cx + 14, cy, text="LIVE", font=self.font_small, fill="red", anchor="w")
-            footer_text = f"Next update in: {self.next_update_in}s"
+            footer_text = f"Next update in: {time_display}"
         else:
             if self.next_game and "gameDate_dt" in self.next_game:
                 dt = self.next_game["gameDate_dt"]
                 away_n = get_team_name(self.next_game["teams"]["away"])
                 home_n = get_team_name(self.next_game["teams"]["home"])
                 try:
-                    footer_text = f"Next: {away_n} @ {home_n} {dt.strftime('%a %b %d, %I:%M %p %Z')} | Next update in: {self.next_update_in}s"
+                    footer_text = f"Next: {away_n} @ {home_n} {dt.strftime('%a %b %d, %I:%M %p %Z')} | Next update in: {time_display}"
                 except Exception:
-                    # NEW: Using f-string for robustness
-                    footer_text = f"Next: {away_n} @ {home_n} | Next update in: {self.next_update_in}s"
+                    # Using f-string for robustness
+                    footer_text = f"Next: {away_n} @ {home_n} | Next update in: {time_display}"
             else:
-                footer_text = f"Waiting for game data for {self.followed_team_name} | Next update in: {self.next_update_in}s"
+                footer_text = f"Waiting for game data for {self.followed_team_name} | Next update in: {time_display}"
         
-        # FIX: The line below was the cause of the SyntaxError. The backslashes are removed.
         self.canvas.create_text(self.width // 2, footer_y, text=footer_text, font=self.font_small, fill=self.fg, tags="footer")
         
         self.balls = balls
@@ -802,7 +815,7 @@ class ScoreboardApp:
             self.render(full=False)
             anim["step"] += 1
             if anim["step"] <= anim["steps"]:
-                # NEW: Always schedule GUI updates using self.root.after in animation
+                # Always schedule GUI updates using self.root.after in animation
                 self.root.after(step_ms, _step)
             else:
                 anim["finished"] = True
@@ -812,7 +825,7 @@ class ScoreboardApp:
         self.root.after(0, _step)
 
     def update_loop(self):
-        # NEW: Using executor.submit to manage the thread
+        # Using executor.submit to manage the thread
         if self.next_update_in <= 0 and not self.running_fetch:
             self.running_fetch = True # Flag set before submission
             # Submit to ThreadPoolExecutor
@@ -843,10 +856,13 @@ class ScoreboardApp:
             for g in games:
                 gd = g.get("gameDate_dt")
                 state = g.get("status", {}).get("detailedState", "") or ""
+                # Find the most recent "finished" game or the current "live" game
                 if gd and state in ("In Progress", "Final", "Game Over") and gd.astimezone(datetime.timezone.utc) <= now_utc:
                     last_game = g
+                # Find the *next* scheduled game (since games are sorted, first match is the next)
                 if gd and gd.astimezone(datetime.timezone.utc) >= now_utc and not next_game:
                     next_game = g
+                # Identify the single currently live game
                 if state == "In Progress":
                     live_game = g
 
@@ -875,7 +891,7 @@ class ScoreboardApp:
                     matchup = current_play.get("matchup", {}) or {}
                     batter = matchup.get("batter", {}).get("fullName")
                     pitcher = matchup.get("pitcher", {}).get("fullName")
-                    self.current_batter = f"Batter: {batter}" if batter else "Batter: -"
+                    self.current_batter = f"Batter: ⚾ {batter}" if batter else "Batter: -"
                     self.current_pitcher = f"Pitcher: {pitcher}" if pitcher else "Pitcher: -"
                 except Exception:
                     self.current_batter = "Batter: -"
@@ -886,7 +902,7 @@ class ScoreboardApp:
                     self.bases[k]["occupied"] = False
                     self.bases[k]["team"] = None
 
-                # NEW: Process currentPlay.runners for *movement/animations*
+                # Process currentPlay.runners for *movement/animations*
                 try:
                     current_play = self.live_feed.get("liveData", {}).get("plays", {}).get("currentPlay", {}) or {}
                     runners_in_play = current_play.get("runners") or current_play.get("baseRunners") or []
@@ -922,7 +938,7 @@ class ScoreboardApp:
                     if DEBUG:
                         print("[DEBUG] Error processing currentPlay.runners for animations.", threading.get_ident())
 
-                # NEW: Use linescore.offense for base *occupancy* (required for the diamond fill)
+                # Use linescore.offense for base *occupancy* (required for the diamond fill)
                 try:
                     ls_off = self.live_feed.get("liveData", {}).get("linescore", {}).get("offense", {}) or {}
                     for key, bkey in (("first", "1B"), ("second", "2B"), ("third", "3B")):
@@ -978,16 +994,38 @@ class ScoreboardApp:
 
             if live_game:
                 self.poll_interval = self.polling.get("live", 15)
-            elif next_game:
-                self.poll_interval = self.polling.get("scheduled", 300)
-            elif last_game:
-                self.poll_interval = self.polling.get("none", 3600)
+            elif next_game and next_game.get("gameDate_dt"):
+                # Smart polling: calculate time until next scheduled game
+                dt_next = next_game["gameDate_dt"].astimezone()
+                dt_now = datetime.datetime.now(dt_next.tzinfo)
+                time_to_next = (dt_next - dt_now).total_seconds()
+
+                # Define poll rate bounds
+                min_poll = self.polling.get("scheduled", 300)  # 5 minutes
+                one_hour = 3600                             # 1 hour
+                
+                if time_to_next <= 0:
+                    # Game is overdue or starting immediately
+                    self.poll_interval = self.polling.get("live", 15)
+                elif time_to_next > one_hour:
+                    # Game is more than 1 hour away: Wait until the 1-hour mark.
+                    wait_interval = time_to_next - one_hour
+                    self.poll_interval = int(wait_interval)
+                else:
+                    # Game is 1 hour or less away: Switch to frequent polling (min_poll rate)
+                    # This ensures a continuous countdown in the final hour.
+                    self.poll_interval = min_poll 
+                    
+                if self.debug and self.poll_interval != self.polling.get("live", 15):
+                    self.log(f"Next game in: {self.format_seconds_to_dhms_string(time_to_next)} ({time_to_next:.0f}s). Smart poll interval set to: {self.poll_interval}s.", verbose=True)
+                    
             else:
+                # No next game found in the schedule lookahead window
                 self.poll_interval = self.polling.get("none", 3600)
 
             self.next_update_in = self.poll_interval
             
-            # NEW: Schedule the full GUI render on the main thread
+            # Schedule the full GUI render on the main thread
             self.root.after(0, self.render_full_gui)
             
         finally:
@@ -1020,7 +1058,7 @@ def main():
 
     signal.signal(signal.SIGINT, sigint_handler)
 
-    root.title("MLB Canvas Scoreboard (final v5)")
+    root.title("MLB Canvas Scoreboard (final v8)")
     app = ScoreboardApp(root)
     root.mainloop()
 
