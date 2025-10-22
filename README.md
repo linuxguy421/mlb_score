@@ -18,7 +18,7 @@ The script implements a sophisticated polling mechanism to be efficient and save
 
 | Game State | Poll Interval | Logic |
 | :--- | :--- | :--- |
-| **LIVE** | **15 seconds** (`polling_intervals["live"]`) | Used when the game is actively **In Progress**. |
+| **LIVE** | **20 seconds** (`polling_intervals["live"]`) | Used when the game is actively **In Progress**. |
 | **SCHEDULED** (Far) | **Time to 1-Hour Mark** | Used when the next game is **more than one hour away**. The script calculates the exact number of seconds until the game is precisely 60 minutes from starting. |
 | **SCHEDULED** (Near) | **300 seconds** (`polling_intervals["scheduled"]`) | Used for the **final hour countdown** until the game starts, ensuring the footer countdown is always ticking. |
 | **NONE** | **3600 seconds** (`polling_intervals["none"]`) | Used when no game is scheduled in the lookahead window, or the last game is Final. |
