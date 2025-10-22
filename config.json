@@ -155,7 +155,7 @@
     }
   },
   "polling_intervals": {
-    "live": 15,
+    "live": 20,
     "scheduled": 300,
     "none": 3600
   },
@@ -166,7 +166,8 @@
     "bg_color": "#121212",
     "fg_color": "#FFFFFF",
     "accent": "#54B0FF",
-    "font_family": "Helvetica"
+    "font_family": "Helvetica",
+    "fullscreen_default": true
   },
   "ui": {
     "max_innings": 9
