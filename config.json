@@ -167,7 +167,7 @@
     "fg_color": "#FFFFFF",
     "accent": "#54B0FF",
     "font_family": "Helvetica",
-    "fullscreen_default": true
+    "fullscreen_default": false
   },
   "ui": {
     "max_innings": 9
