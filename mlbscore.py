@@ -891,7 +891,7 @@ class ScoreboardApp:
                     matchup = current_play.get("matchup", {}) or {}
                     batter = matchup.get("batter", {}).get("fullName")
                     pitcher = matchup.get("pitcher", {}).get("fullName")
-                    self.current_batter = f"Batter: ⚾ {batter}" if batter else "Batter: -"
+                    self.current_batter = f"Batter: {batter}" if batter else "Batter: -"
                     self.current_pitcher = f"Pitcher: {pitcher}" if pitcher else "Pitcher: -"
                 except Exception:
                     self.current_batter = "Batter: -"
