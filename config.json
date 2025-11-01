@@ -1,4 +1,5 @@
 {
+  "api_mode": "production",
   "team_id": 119,
   "teams": {
     "Arizona Diamondbacks": 109,
@@ -38,64 +39,64 @@
       "accent": "#E3D4AD"
     },
     "Atlanta Braves": {
-      "primary": "#13274F",
-      "accent": "#CE1141"
+      "primary": "#132448",
+      "accent": "#C41E3A"
     },
     "Baltimore Orioles": {
-      "primary": "#000000",
-      "accent": "#DF4601"
+      "primary": "#DF4601",
+      "accent": "#000000"
     },
     "Boston Red Sox": {
-      "primary": "#BD3039",
-      "accent": "#192C55"
+      "primary": "#C8102E",
+      "accent": "#0A243F"
     },
     "Chicago Cubs": {
       "primary": "#0E3386",
       "accent": "#CC3433"
     },
     "Chicago White Sox": {
-      "primary": "#000000",
-      "accent": "#C4CED4"
+      "primary": "#27251F",
+      "accent": "#C4CED3"
     },
     "Cincinnati Reds": {
       "primary": "#C6011F",
       "accent": "#000000"
     },
     "Cleveland Guardians": {
-      "primary": "#00385D",
-      "accent": "#E50022"
+      "primary": "#0C2340",
+      "accent": "#E31937"
     },
     "Colorado Rockies": {
-      "primary": "#33006F",
-      "accent": "#C4CED4"
+      "primary": "#332F65",
+      "accent": "#C4CED3"
     },
     "Detroit Tigers": {
-      "primary": "#0C2340",
-      "accent": "#F26722"
+      "primary": "#0F2848",
+      "accent": "#FA4616"
     },
     "Houston Astros": {
       "primary": "#002D62",
       "accent": "#EB6E1F"
     },
     "Kansas City Royals": {
-      "primary": "#174885",
-      "accent": "#C0995A"
+      "primary": "#004687",
+      "accent": "#7AC2E5"
     },
     "Los Angeles Angels": {
       "primary": "#BA0021",
-      "accent": "#C4CED4"
+      "accent": "#C4CED3"
     },
     "Los Angeles Dodgers": {
       "primary": "#005A9C",
-      "accent": "#EF3E42"
+      "accent": "#C4CED3"
     },
     "Miami Marlins": {
-      "primary": "#000000",
-      "accent": "#0077C8"
+      "primary": "#00A3E0",
+      "accent": "#EF3340"
     },
     "Milwaukee Brewers": {
-      "primary": "#0A2351",
-      "accent": "#B6922E"
+      "primary": "#0A2548",
+      "accent": "#FFC52F"
     },
     "Minnesota Twins": {
       "primary": "#002B5C",
@@ -147,7 +148,7 @@
     },
     "Toronto Blue Jays": {
       "primary": "#134A8E",
-      "accent": "#E2231A"
+      "accent": "#1D2D5C"
     },
     "Washington Nationals": {
       "primary": "#AB0003",
@@ -155,22 +156,14 @@
     }
   },
   "polling_intervals": {
-    "live": 20,
+    "live": 15,
     "scheduled": 300,
     "none": 3600
   },
   "lookahead_days": 7,
   "canvas": {
     "width": 1000,
-    "height": 500,
-    "bg_color": "#121212",
-    "fg_color": "#FFFFFF",
-    "accent": "#54B0FF",
-    "font_family": "Helvetica",
-    "fullscreen_default": false
-  },
-  "ui": {
-    "max_innings": 9
-  },
-  "debug": true
+    "height": 600,
+    "fill": "#0F2848"
+  }
 }
