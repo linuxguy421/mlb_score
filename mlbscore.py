@@ -58,7 +58,10 @@ parser = argparse.ArgumentParser(description="MLB Canvas Scoreboard (final v8)")
 parser.add_argument("--config", default="config.json", help="Path to config.json")
 parser.add_argument("--team", help="Team name (overrides config team_id if found)")
 parser.add_argument("--debug", action="store_true", help="Enable debug logging (overrides config)")
+parser.add_argument("--record", nargs="?", const="record_log.json",
+                    help="Record all live feed data to a JSON log file (default: record_log.json)")
 args = parser.parse_args()
+RECORD_PATH = args.record
 
 # -------------------------
 # Config loader
@@ -152,6 +155,7 @@ def fetch_schedule(team_id=TEAM_ID, lookahead=LOOKAHEAD_DAYS):
 def fetch_live_feed(gamePk):
     if not gamePk:
         return None
+
     sess = make_session()
     # Using f-string for URL
     url = f"https://statsapi.mlb.com/api/v1.1/game/{gamePk}/feed/live"
@@ -163,6 +167,28 @@ def fetch_live_feed(gamePk):
         if DEBUG:
             print(f"[DEBUG] fetch_live_feed error: {e}")
         return None
+
+def record_live_feed(feed, game_info=None):
+    """Appends a live feed snapshot to a JSON log file if --record is enabled."""
+    if not RECORD_PATH or not feed:
+        return
+    try:
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "gamePk": None,
+            "state": None,
+            "feed": feed
+        }
+        if game_info:
+            entry["gamePk"] = game_info.get("gamePk")
+            entry["state"] = game_info.get("status", {}).get("detailedState")
+        with open(RECORD_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        if DEBUG:
+            print(f"[DEBUG] Recorded live feed snapshot to {RECORD_PATH}")
+    except Exception as e:
+        print(f"[ERROR] Failed to record feed: {e}")
+
 
 # -------------------------
 # Helpers
@@ -784,7 +810,7 @@ class ScoreboardApp:
             footer_text = f"Next update in: {time_display}"
         else:
             if self.next_game and "gameDate_dt" in self.next_game:
-                dt = self.next_game["gameDate_dt"]
+                dt = self.next_game["gameDate_dt"].astimezone()
                 away_n = get_team_name(self.next_game["teams"]["away"])
                 home_n = get_team_name(self.next_game["teams"]["home"])
                 try:
@@ -882,6 +908,7 @@ class ScoreboardApp:
             if chosen:
                 feed = fetch_live_feed(chosen.get("gamePk"))
                 self.live_feed = feed
+                record_live_feed(feed, chosen) # FIXED: Moved inside the 'if' block
             else:
                 self.live_feed = None
 
