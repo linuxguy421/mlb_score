@@ -638,6 +638,9 @@ class ScoreboardApp:
         col_width = self.col_width
         row_height = self.row_height
 
+        y_away = top_margin + row_height
+        y_home = y_away + row_height
+
         # Full render components
         if full:
             title_text = f"{self.followed_team_name} — MLB Scoreboard"
@@ -754,8 +757,6 @@ class ScoreboardApp:
             self.canvas.create_rectangle(x_icon - col_width // 2, y - 18, x_icon + col_width // 2, y + 18,
                                          fill=bg_col, outline="black", tags=icon_tag)
 
-        y_away = top_margin + row_height
-        y_home = y_away + row_height
         draw_team_row(y_away, away, "away", active_inning_idx)
         draw_team_row(y_home, home, "home", active_inning_idx)
 
