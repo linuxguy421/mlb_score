@@ -21,7 +21,7 @@
     "Minnesota Twins": 142,
     "New York Yankees": 147,
     "New York Mets": 121,
-    "Oakland Athletics": 133,
+    "Sacramento Athletics": 133,
     "Philadelphia Phillies": 143,
     "Pittsburgh Pirates": 134,
     "San Diego Padres": 135,
@@ -110,7 +110,7 @@
       "primary": "#132448",
       "accent": "#C4CED3"
     },
-    "Oakland Athletics": {
+    "Sacramento Athletics": {
       "primary": "#003831",
       "accent": "#EFB21E"
     },
@@ -156,7 +156,8 @@
     }
   },
   "polling_intervals": {
-    "live": 15,
+    "live": 30,
+    "pre_game": 60,
     "scheduled": 300,
     "none": 3600
   },
@@ -164,6 +165,6 @@
   "canvas": {
     "width": 1000,
     "height": 600,
-    "fill": "#0F2848"
+    "bg_color": "#0F2848"
   }
 }
