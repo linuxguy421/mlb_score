@@ -44,6 +44,15 @@ from concurrent.futures import ThreadPoolExecutor # NEW: For cleaner thread mana
 # Lock protecting all shared mutable state written by the background thread
 _STATE_LOCK = threading.Lock()
 
+def _ts():
+    """Return current HH:MM:SS timestamp string."""
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+def _log(level, cat, *args):
+    """Module-level structured log line."""
+    msg = " ".join(str(a) for a in args)
+    print(f"{_ts()} [{level.upper()}/{cat.upper()}] {msg}")
+
 # -------------------------
 # Defaults
 # -------------------------
@@ -91,7 +100,7 @@ def load_config(path):
     cfg = deepcopy(DEFAULT_CONFIG)
     p = pathlib.Path(path)
     if not p.exists():
-        print(f"[INFO] config {path} not found; using defaults")
+        _log("INFO", "CONFIG", f"config {path} not found; using defaults")
         return cfg
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -102,7 +111,7 @@ def load_config(path):
                 cfg[k] = v
         return cfg
     except Exception as e:
-        print("[ERROR] Failed to load config:", e)
+        _log("ERROR", "CONFIG", "Failed to load config:", e)
         return cfg
 
 CONFIG = load_config(args.config)
@@ -176,7 +185,7 @@ def fetch_schedule(team_id=None, lookahead=LOOKAHEAD_DAYS):
         data = r.json()
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] fetch_schedule error: {e}")
+            _log("DEBUG", "POLL", f"fetch_schedule error: {e}")
         return []
     games = []
     for d in data.get("dates", []):
@@ -255,12 +264,26 @@ _LIVE_FEED_FIELDS = (
     "liveData,boxscore,teams,away,players,"
     "liveData,boxscore,teams,home,players,seasonStats,batting,avg,"
     "liveData,boxscore,teams,home,players,seasonStats,batting,obp,"
+    "liveData,boxscore,teams,home,players,seasonStats,batting,homeRuns,"
+    "liveData,boxscore,teams,home,players,seasonStats,batting,rbi,"
     "liveData,boxscore,teams,away,players,seasonStats,batting,avg,"
     "liveData,boxscore,teams,away,players,seasonStats,batting,obp,"
+    "liveData,boxscore,teams,away,players,seasonStats,batting,homeRuns,"
+    "liveData,boxscore,teams,away,players,seasonStats,batting,rbi,"
+    "liveData,boxscore,teams,home,players,seasonStats,pitching,wins,"
+    "liveData,boxscore,teams,home,players,seasonStats,pitching,era,"
+    "liveData,boxscore,teams,away,players,seasonStats,pitching,wins,"
+    "liveData,boxscore,teams,away,players,seasonStats,pitching,era,"
     "liveData,boxscore,teams,home,players,stats,pitching,pitchesThrown,"
     "liveData,boxscore,teams,away,players,stats,pitching,pitchesThrown,"
     "liveData,boxscore,teams,home,players,person,fullName,"
-    "liveData,boxscore,teams,away,players,person,fullName"
+    "liveData,boxscore,teams,away,players,person,fullName,"
+    "liveData,boxscore,teams,home,players,person,firstName,"
+    "liveData,boxscore,teams,away,players,person,firstName,"
+    "liveData,boxscore,teams,home,players,position,abbreviation,"
+    "liveData,boxscore,teams,away,players,position,abbreviation,"
+    "liveData,boxscore,teams,home,players,battingOrder,"
+    "liveData,boxscore,teams,away,players,battingOrder"
 )
 
 def fetch_live_feed(gamePk):
@@ -274,7 +297,7 @@ def fetch_live_feed(gamePk):
         return r.json()
     except Exception as e:
         if DEBUG:
-            print(f"[DEBUG] fetch_live_feed error: {e}")
+            _log("DEBUG", "FEED", f"fetch_live_feed error: {e}")
         return None
 
 # --- CRITICAL FIX: Combined and cleaned up record_live_feed ---
@@ -345,7 +368,7 @@ def record_live_feed(feed, game_info=None, full=False):
                 f.write(json.dumps(meta) + "\n")
             _header_written_for_pk = current_pk
             if DEBUG:
-                print(f"[DEBUG] Wrote header to {filename}")
+                _log("DEBUG", "RECORD", f"Wrote header to {filename}")
 
         # Skip redundant state unless full mode
         if not full and entry == _last_record_state:
@@ -357,10 +380,10 @@ def record_live_feed(feed, game_info=None, full=False):
         _last_record_state = entry
 
         if DEBUG:
-            print(f"[DEBUG] Recorded {'FULL' if full else 'EVENT'} snapshot to {filename}")
+            _log("DEBUG", "RECORD", f"Recorded {'FULL' if full else 'EVENT'} snapshot to {filename}")
 
     except Exception as e:
-        print(f"[ERROR] Failed to record feed: {e}")
+        _log("ERROR", "RECORD", f"Failed to record feed: {e}")
         
     # Redundant second recording block removed for cleanup.
 
@@ -431,7 +454,8 @@ class ScoreboardApp:
         self.fg = CANVAS_CFG.get("fg_color", "#eaeaea")
         self.accent = CANVAS_CFG.get("accent", "#FFD700")
         self.font_family = CANVAS_CFG.get("font_family", "Courier")
-        self.STATUS_BAR_H = 56   # two-row status bar height in pixels
+        self.STATUS_BAR_H_LIVE = 84   # three-row height when a game is live (adds marquee row)
+        self.STATUS_BAR_H      = 56   # two-row height when not live
 
         self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                 bg=self.bg, highlightthickness=0)
@@ -443,6 +467,9 @@ class ScoreboardApp:
         # Fix #11: track fetch errors to surface them in the UI
         self._fetch_error = False
         self._fetch_error_msg = ""
+        # Poll status indicator: "error" | "unchanged" | "updated" | "pending"
+        self._poll_status = "pending"
+        self._poll_status_set_at = time.time()  # when the current status was last written
 
         # fonts
         self.font_title = tkfont.Font(family=self.font_family, size=18, weight="bold")
@@ -454,6 +481,7 @@ class ScoreboardApp:
         self.font_sb_value = tkfont.Font(family=self.font_family, size=11, weight="bold")
         self.font_score_big = tkfont.Font(family=self.font_family, size=36, weight="bold")
         self.font_clock = tkfont.Font(family=self.font_family, size=10)
+        self.font_marquee = tkfont.Font(family=self.font_family, size=10)
 
         # ThreadPoolExecutor for network operations
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -495,6 +523,24 @@ class ScoreboardApp:
         self.sb_batter_obp = None         # str e.g. ".350"
         self.sb_pitch_count = None        # int total pitches thrown by current pitcher
         self.sb_weather = None            # str e.g. "72°F Sunny"
+
+        # Marquee scroller state
+        self._marquee_text = ""          # full pre-built scroll string
+        self._marquee_x = 0             # current left-edge x position
+        self._marquee_text_w = 0        # measured pixel width of the full string
+        self._marquee_after_id = None   # handle for scheduled tick
+        self._marquee_canvas_id = None  # canvas item id for the scrolling text
+        self._marquee_is_live = False   # tracks live/not-live for string rebuild
+        self._marquee_active = False    # True only while live
+        self._marquee_batter_span = None
+        self._marquee_pitcher_span = None
+
+        # Roster for marquee: list of dicts per team [{name, pos, is_batter, is_pitcher}, ...]
+        self.marquee_followed_roster = []
+        self.marquee_opponent_roster = []
+        # Season stats for the followed team — used in not-live marquee
+        # Each entry: {str: display_string, full_name: str, order: int, is_pitcher: bool}
+        self.followed_season_stats = []
 
         # Runner names per base (last name for display in runner dots)
         self.runner_names = {"1B": None, "2B": None, "3B": None}
@@ -539,9 +585,10 @@ class ScoreboardApp:
         # limited debug trackers
         self._last_poll_time = 0
         self._last_runner_state = {}
-        self._last_log_state = None
         # Timestamp-based skip-render: store last seen metaData.timeStamp from live feed
         self._last_feed_timestamp = None
+        # Track last known game status for change detection
+        self._last_game_status = ""
 
     def _on_canvas_resize(self, event):
         """Fix #10: Update tracked width/height when the window is resized and trigger a full redraw."""
@@ -554,20 +601,178 @@ class ScoreboardApp:
             self.score_start_x = max(200, int(new_w * 0.30))
             self.render_full_gui()
 
-    def log(self, *args, verbose=False, level="info"):
-        """Centralized logging utility."""
+    def log(self, *args, verbose=False, level="info", cat="APP"):
+        """
+        Centralised logging with HH:MM:SS timestamp and category prefix.
+
+        Categories: POLL, FEED, GAME, UI, RECORD, CONFIG, APP
+        verbose=True lines only print in --debug mode.
+        level="error" always prints regardless of debug flag.
+        """
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        cat = cat.upper()
+
         if verbose:
             if not self.debug:
                 return
-            print("[DEBUG]", *args)
+            msg = " ".join(str(a) for a in args)
+            print(f"{ts} [DEBUG/{cat}] {msg}")
         else:
-            if level and str(level).lower() == "error":
-                print(f"[ERROR]", *args)
-                return
-            if self.debug or str(level).lower() == "info":
-                print(f"[{str(level).upper()}]", *args)
+            lvl = str(level).lower()
+            if lvl == "error":
+                msg = " ".join(str(a) for a in args)
+                print(f"{ts} [ERROR/{cat}] {msg}")
+            elif self.debug or lvl == "info":
+                msg = " ".join(str(a) for a in args)
+                print(f"{ts} [{lvl.upper()}/{cat}] {msg}")
 
-    # runner helpers
+    def _set_poll_status(self, status):
+        """Set poll status and record the time it was set. Always call under _STATE_LOCK."""
+        self._poll_status = status
+        self._poll_status_set_at = time.time()
+
+    # ── Marquee scroller ──────────────────────────────────────────────────────
+
+    def _build_marquee_string(self):
+        """
+        Build the full marquee scroll string.
+        Returns (full_str, batter_span, pitcher_span).
+        """
+        sep = "   •   "
+        followed_name = self.followed_team_name or "TEAM"
+
+        is_live = False
+        if self.live_feed:
+            st = (self.live_feed.get("gameData", {})
+                  .get("status", {}).get("detailedState", "")) or ""
+            is_live = "In Progress" in st or "Live" in st
+
+        if is_live:
+            opp_name = "OPP"
+            if self.live_feed:
+                gd = self.live_feed.get("gameData", {}).get("teams", {}) or {}
+                home_n = gd.get("home", {}).get("name", "")
+                away_n = gd.get("away", {}).get("name", "")
+                opp_name = away_n if home_n == followed_name else home_n
+
+            followed_body = sep.join(p["str"] for p in self.marquee_followed_roster)
+            opponent_body = sep.join(p["str"] for p in self.marquee_opponent_roster)
+            full = (f"{followed_name.upper()} ► {followed_body}"
+                    f"          ⚾          "
+                    f"{opp_name.upper()} ► {opponent_body}")
+
+            batter_fn  = self.current_batter.replace("Batter: ", "").strip()
+            pitcher_fn = self.current_pitcher.replace("Pitcher: ", "").strip()
+            batter_span = pitcher_span = None
+            for p in self.marquee_followed_roster + self.marquee_opponent_roster:
+                idx = full.find(p["str"])
+                if idx < 0:
+                    continue
+                if p["full_name"] == batter_fn:
+                    batter_span = (idx, idx + len(p["str"]))
+                if p["full_name"] == pitcher_fn:
+                    pitcher_span = (idx, idx + len(p["str"]))
+
+            return full, batter_span, pitcher_span
+
+        else:
+            if not self.followed_season_stats:
+                full = f"{followed_name.upper()} ► No stats available"
+                return full, None, None
+            body = sep.join(p["str"] for p in self.followed_season_stats)
+            full = f"{followed_name.upper()} ►  {body}"
+            return full, None, None
+
+    def _marquee_start(self):
+        """Build the marquee string and start the scroll tick if not already running."""
+        text, b_span, p_span = self._build_marquee_string()
+        self._marquee_text         = text
+        self._marquee_text_w       = self.font_marquee.measure(text)
+        self._marquee_batter_span  = b_span
+        self._marquee_pitcher_span = p_span
+
+        if not self._marquee_active:
+            self._marquee_x      = self.width
+            self._marquee_active = True
+
+        if self._marquee_canvas_id:
+            try:
+                self.canvas.delete(self._marquee_canvas_id)
+            except Exception:
+                pass
+            self._marquee_canvas_id = None
+
+        self._marquee_tick()
+
+    def _marquee_stop(self):
+        """Stop the scroller and remove its canvas item."""
+        self._marquee_active = False
+        if self._marquee_after_id:
+            self.root.after_cancel(self._marquee_after_id)
+            self._marquee_after_id = None
+        if self._marquee_canvas_id:
+            try:
+                self.canvas.delete(self._marquee_canvas_id)
+            except Exception:
+                pass
+            self._marquee_canvas_id = None
+
+    def _marquee_tick(self):
+        """Advance the marquee by ~1.67px (50px/s at 30fps) and reschedule."""
+        if not self._marquee_active:
+            return
+
+        sbh     = self.STATUS_BAR_H_LIVE
+        row_h   = sbh // 3
+        bar_top = self.height - sbh
+        row_cy  = bar_top + row_h // 2
+
+        # 50 px/s ÷ 30 fps ≈ 1.67 px per tick
+        self._marquee_x -= 1.67
+
+        if self._marquee_x < -self._marquee_text_w:
+            self._marquee_x = self.width
+
+        if self._marquee_canvas_id:
+            try:
+                self.canvas.delete(self._marquee_canvas_id)
+            except Exception:
+                pass
+
+        self._marquee_canvas_id = self.canvas.create_text(
+            int(self._marquee_x), row_cy,
+            text=self._marquee_text,
+            font=self.font_marquee,
+            fill="#ffffff",
+            anchor="nw",
+            tags="marquee"
+        )
+
+        # Highlight segments for batter (gold) and pitcher (cyan)
+        x_offset = int(self._marquee_x)
+        for span, color in (
+            (self._marquee_batter_span,  self.accent),
+            (self._marquee_pitcher_span, "#00e5ff"),
+        ):
+            if span is None:
+                continue
+            pre_w    = self.font_marquee.measure(self._marquee_text[:span[0]])
+            seg_text = self._marquee_text[span[0]:span[1]]
+            seg_x    = x_offset + pre_w
+            seg_w    = self.font_marquee.measure(seg_text)
+            if seg_x + seg_w > 0 and seg_x < self.width:
+                self.canvas.create_text(
+                    seg_x, row_cy,
+                    text=seg_text,
+                    font=self.font_marquee,
+                    fill=color,
+                    anchor="nw",
+                    tags="marquee"
+                )
+
+        self._marquee_after_id = self.root.after(33, self._marquee_tick)
+
+    # ─────────────────────────────────────────────────────────────────────────
     def compute_base_positions(self):
         """Calculates base coordinates relative to the diamond center."""
         ds = self.diamond_ds or 120
@@ -586,7 +791,7 @@ class ScoreboardApp:
         """Spawns a static runner icon at a base."""
         # Only perform GUI ops on main thread, but this is designed to be called via root.after(0, ...)
         if threading.current_thread() != threading.main_thread():
-             self.log(f"Spawn requested for {base_key} from non-main thread. Scheduling...", verbose=True)
+             self.log(f"Spawn requested for {base_key} from non-main thread. Scheduling...", verbose=True, cat="UI")
              self.root.after(0, lambda: self.spawn_runner_at_base(base_key, color))
              return
 
@@ -605,14 +810,14 @@ class ScoreboardApp:
                                       fill=color, outline="white", width=2)
         self.runners[rkey] = {"cid": cid, "base": base_key, "color": color}
         self.runners_by_base[base_key] = rkey
-        self.log(f"Runner spawned: {rkey} at {base_key}", verbose=True)
+        self.log(f"Runner spawned: {rkey} at {base_key}", verbose=True, cat="UI")
         return rkey
 
     def move_runner_base(self, from_base, to_base, color=None, steps=12):
         """Handles runner movement with animation and base state updates."""
         # Only perform GUI ops on main thread, but this is designed to be called via root.after(0, ...)
         if threading.current_thread() != threading.main_thread():
-             self.log(f"Move requested for {from_base} to {to_base} from non-main thread. Scheduling...", verbose=True)
+             self.log(f"Move requested for {from_base} to {to_base} from non-main thread. Scheduling...", verbose=True, cat="UI")
              self.root.after(0, lambda: self.move_runner_base(from_base, to_base, color, steps))
              return
 
@@ -620,7 +825,7 @@ class ScoreboardApp:
         runner = self.runners.get(rkey)
 
         if not rkey or not runner:
-            self.log(f"Move requested from {from_base} but no runner found/present.", verbose=True)
+            self.log(f"Move requested from {from_base} but no runner found/present.", verbose=True, cat="UI")
             if to_base != "Home":
                 # Fallback: if a runner was missed/wasn't animated, ensure it's at the destination
                 return self.spawn_runner_at_base(to_base, color=color or self.accent)
@@ -639,7 +844,7 @@ class ScoreboardApp:
         self.runners.pop(rkey, None) # Runner is now represented by the animation object
 
         if not start or not end:
-            self.log(f"Error: Base positions unknown for {from_base} or {to_base}. Spawning at destination.", level="error")
+            self.log(f"Error: Base positions unknown for {from_base} or {to_base}. Spawning at destination.", level="error", cat="UI")
             if to_base != "Home":
                 return self.spawn_runner_at_base(to_base, color=color)
             return None
@@ -658,7 +863,7 @@ class ScoreboardApp:
                 if to_base != "Home":
                     # Spawn the static runner at the new base
                     new_key = self.spawn_runner_at_base(to_base, color=color)
-                    self.log(f"Runner moved: {rkey} {from_base} -> {to_base} as {new_key}", verbose=True)
+                    self.log(f"Runner moved: {rkey} {from_base} -> {to_base} as {new_key}", verbose=True, cat="UI")
                 else:
                     # Runner scored, do the fade out animation
                     shrink_id = self.canvas.create_oval(tx - 8, ty - 8, tx + 8, ty + 8, fill=color, outline="white", width=2)
@@ -674,7 +879,7 @@ class ScoreboardApp:
                         self.canvas.coords(shrink_id, tx - w, ty - w, tx + w, ty + w)
                         self.root.after(40, lambda: _shrink(step + 1, maxs))
                     _shrink()
-                    self.log(f"Runner {rkey} scored at Home", verbose=True)
+                    self.log(f"Runner {rkey} scored at Home", verbose=True, cat="UI")
                 # Force a full render to reflect the new state (e.g., cleared base/runner)
                 self.render_full_gui()
                 return
@@ -705,7 +910,7 @@ class ScoreboardApp:
                 pass
         self.runners.clear()
         self.runners_by_base.clear()
-        self.log("All runners cleared", verbose=True)
+        self.log("All runners cleared", verbose=True, cat="UI")
 
     def render_full_gui(self):
         """Wrapper to ensure full render is called on the main thread."""
@@ -734,11 +939,12 @@ class ScoreboardApp:
     def render(self, full=True):
         """Main rendering function (must be called on main thread)."""
         if threading.current_thread() != threading.main_thread():
-            self.log("render() called from non-main thread!", level="error")
+            self.log("render() called from non-main thread!", level="error", cat="UI")
             return
 
         if full:
             self.canvas.delete("all")
+            self._marquee_canvas_id = None
         else:
             # Clear dynamic groups for redraw
             self.canvas.delete("status_bar")
@@ -874,13 +1080,21 @@ class ScoreboardApp:
                 self.canvas.create_text(x_center, top_margin, text=str(i + 1), font=self.font_header, fill=self.accent, tags="inning_header_text")
 
             # totals headers: R, H, E, extra (bat icon column)
+            is_final_hdr = False
+            if self.live_feed:
+                hdr_state = (self.live_feed.get("gameData", {}).get("status", {}).get("detailedState", "")) or ""
+                is_final_hdr = "Final" in hdr_state or "Game Over" in hdr_state
             totals_labels = ("R", "H", "E", "⚾")
             for j, label in enumerate(totals_labels):
                 x_center = score_start_x + (max_innings + j) * col_width
                 self.canvas.create_rectangle(x_center - col_width // 2, top_margin - 18,
                                              x_center + col_width // 2, top_margin + 18,
                                              fill=self.bg, outline="black")
-                self.canvas.create_text(x_center, top_margin, text=label if label != "⚾" else "🦇", font=self.font_header, fill=self.accent)
+                if label == "⚾":
+                    display = "🏆" if is_final_hdr else "🦇"
+                else:
+                    display = label
+                self.canvas.create_text(x_center, top_margin, text=display, font=self.font_header, fill=self.accent)
 
             # --- Clean, properly aligned grid overlay ---
             grid_left = team_x - 8
@@ -1201,42 +1415,73 @@ class ScoreboardApp:
 
     def render_status_bar(self, away_name, home_name):
         """
-        Two-row team-colored status bar anchored to the bottom of the canvas.
-
-        Row 1 (game state):  STATUS PILL  |  Inning  |  Next poll countdown  |  ⚠ error
-        Row 2 (at-bat):      Last pitch   |  Win prob bar  |  Batter AVG / OBP  |  Pitch count
+        Status bar anchored to the bottom of the canvas.
+        Live:     3 rows — marquee (lineup scroller) | game state | at-bat stats
+        Not live: 2 rows — game state | next game / at-bat stats
         """
         tag = "status_bar"
-        sbh = self.STATUS_BAR_H          # total bar height (two rows)
-        row_h = sbh // 2                 # height of each row
+
+        # Determine live status
+        state_str = ""
+        is_live = False
+        if self.live_feed:
+            state_str = (self.live_feed.get("gameData", {})
+                         .get("status", {}).get("detailedState", "")) or ""
+            is_live = "In Progress" in state_str or "Live" in state_str
+
+        # Always 3 rows: marquee | game state | at-bat / next-game
+        sbh   = self.STATUS_BAR_H_LIVE
+        row_h = sbh // 3
         bar_top = self.height - sbh
-        bar_mid = bar_top + row_h
         bar_bot = self.height
 
-        # ── Background: gradient from away primary (left) to home primary (right) ──
+        row1_cy = bar_top + row_h // 2              # marquee row
+        row2_cy = bar_top + row_h + row_h // 2      # game state row
+        row3_cy = bar_top + row_h * 2 + row_h // 2  # at-bat / next-game row
+        sep1    = bar_top + row_h
+        sep2    = bar_top + row_h * 2
+
+        # ── Background gradient ───────────────────────────────────────────────
         away_col = team_color_for(away_name)[0]
         home_col = team_color_for(home_name)[0]
-        # Draw as a series of thin vertical slices to simulate the gradient
         slices = 40
         for i in range(slices):
-            t = i / float(slices)
+            t    = i / float(slices)
             fill = blend_colors(away_col, home_col, t)
-            x0 = int(self.width * i / slices)
-            x1 = int(self.width * (i + 1) / slices) + 1
+            x0   = int(self.width * i / slices)
+            x1   = int(self.width * (i + 1) / slices) + 1
             self.canvas.create_rectangle(x0, bar_top, x1, bar_bot,
                                          fill=fill, outline="", tags=tag)
 
-        # Dim overlay so text is always readable
+        # Dim overlay
         self.canvas.create_rectangle(0, bar_top, self.width, bar_bot,
                                      fill="#000000", stipple="gray50",
                                      outline="", tags=tag)
 
-        # Thin separator line above bar
+        # Top border + row separators
         self.canvas.create_line(0, bar_top, self.width, bar_top,
                                 fill=self.accent, width=1, tags=tag)
-        # Mid-row separator
-        self.canvas.create_line(0, bar_mid, self.width, bar_mid,
+        self.canvas.create_line(0, sep1, self.width, sep1,
                                 fill="#ffffff", width=1, tags=tag, stipple="gray25")
+        self.canvas.create_line(0, sep2, self.width, sep2,
+                                fill="#ffffff", width=1, tags=tag, stipple="gray25")
+
+        # ── Marquee row — always active ───────────────────────────────────────
+        # Start or refresh the scroller
+        if not self._marquee_active:
+            self.root.after(0, self._marquee_start)
+        else:
+            # Rebuild string each render (live/not-live or batter/pitcher may change)
+            text, b_span, p_span = self._build_marquee_string()
+            if text != self._marquee_text:
+                self._marquee_text         = text
+                self._marquee_text_w       = self.font_marquee.measure(text)
+                self._marquee_batter_span  = b_span
+                self._marquee_pitcher_span = p_span
+
+        # Reassign row centres for stat rows (same in all cases now)
+        game_row_cy  = row2_cy
+        atbat_row_cy = row3_cy
 
         # Helper: draw a labelled stat segment
         def stat_cell(cx, cy, label, value, value_fill="#ffffff"):
@@ -1247,17 +1492,7 @@ class ScoreboardApp:
                                     font=self.font_sb_value, fill=value_fill,
                                     anchor="center", tags=tag)
 
-        # ── ROW 1: game state ──────────────────────────────────────────────────
-        row1_cy = bar_top + row_h // 2
-
-        # Determine game status
-        state_str = ""
-        is_live = False
-        if self.live_feed:
-            state_str = (self.live_feed.get("gameData", {})
-                         .get("status", {}).get("detailedState", "")) or ""
-            is_live = "In Progress" in state_str or "Live" in state_str
-
+        # ── Game state row ─────────────────────────────────────────────────────
         # Status pill
         if is_live:
             pill_text = "● LIVE"
@@ -1273,7 +1508,7 @@ class ScoreboardApp:
             pill_fill = "#7f8c8d"
 
         pill_x = 60
-        self.canvas.create_text(pill_x, row1_cy, text=pill_text,
+        self.canvas.create_text(pill_x, game_row_cy, text=pill_text,
                                 font=self.font_sb_value, fill=pill_fill,
                                 anchor="center", tags=tag)
 
@@ -1287,29 +1522,59 @@ class ScoreboardApp:
                 arrow = "▲" if str(half).lower() == "top" else "▼"
                 inning_str = f"{arrow} {inn}"
         if inning_str:
-            stat_cell(180, row1_cy, "inning", inning_str)
+            stat_cell(180, game_row_cy, "inning", inning_str)
 
-        # Weather (centre of row 1)
+        # Weather (centre of game state row)
         if self.sb_weather:
-            stat_cell(self.width // 2, row1_cy, "weather", self.sb_weather)
+            stat_cell(self.width // 2, game_row_cy, "weather", self.sb_weather)
 
-        # Next poll countdown — right-aligned
+        # API Status pill
+        elapsed_since_status = time.time() - self._poll_status_set_at
+        effective_poll_status = self._poll_status
+        if self._poll_status != "pending" and elapsed_since_status > 300 and self.next_update_in > 300:
+            effective_poll_status = "pending"
+        poll_status_text = {
+            "updated":   "  updated  ",
+            "unchanged": " no change ",
+            "error":     "   error   ",
+            "pending":   "  pending  ",
+        }.get(effective_poll_status, "  pending  ")
+        poll_bg_color = {
+            "updated":   "#00c853",
+            "unchanged": "#f9a825",
+            "error":     "#c62828",
+            "pending":   "#616161",
+        }.get(effective_poll_status, "#616161")
+        pill_fg = "#000000"
+        api_pill_x = self.width - 8
+        pill_w = self.font_sb_value.measure(poll_status_text)
+        pill_h = 16
+        pill_cx = api_pill_x - pill_w // 2 - 2
+        self.canvas.create_text(pill_cx, game_row_cy - 6, text="API STATUS",
+                                font=self.font_sb_label, fill="#cccccc",
+                                anchor="center", tags=tag)
+        pill_cy = game_row_cy + 7
+        self.canvas.create_rectangle(api_pill_x - pill_w - 4, pill_cy - pill_h // 2,
+                                     api_pill_x + 4, pill_cy + pill_h // 2,
+                                     fill=poll_bg_color, outline="", tags=tag)
+        self.canvas.create_text(api_pill_x, pill_cy, text=poll_status_text,
+                                font=self.font_sb_value, fill=pill_fg,
+                                anchor="e", tags=tag)
+
+        # Next poll countdown
         time_display = self.format_seconds_to_dhms_string(self.next_update_in)
-        stat_cell(self.width - 120, row1_cy, "next poll", time_display)
+        stat_cell(self.width - 120, game_row_cy, "next poll", time_display)
 
-        # Error indicator (if any)
+        # Error indicator
         if self._fetch_error:
-            self.canvas.create_text(self.width - 240, row1_cy,
+            self.canvas.create_text(self.width - 240, game_row_cy,
                                     text=f"⚠ {self._fetch_error_msg}",
                                     font=self.font_sb_label, fill="#e67e22",
                                     anchor="center", tags=tag)
 
-        # ── ROW 2: at-bat stats ────────────────────────────────────────────────
-        row2_cy = bar_mid + row_h // 2
-
+        # ── At-bat stats row ───────────────────────────────────────────────────
         # Only show live at-bat stats when a game is in progress
         if not is_live:
-            # Show next game info instead
             if self.next_game and "gameDate_dt" in self.next_game:
                 try:
                     dt = self.next_game["gameDate_dt"].astimezone()
@@ -1320,7 +1585,7 @@ class ScoreboardApp:
                     next_txt = "Next game info unavailable"
             else:
                 next_txt = f"No upcoming games found for {self.followed_team_name}"
-            self.canvas.create_text(self.width // 2, row2_cy, text=next_txt,
+            self.canvas.create_text(self.width // 2, atbat_row_cy, text=next_txt,
                                     font=self.font_sb_value, fill="#ffffff",
                                     anchor="center", tags=tag)
             return
@@ -1334,46 +1599,42 @@ class ScoreboardApp:
             pitch_str = self.sb_last_pitch_type
         else:
             pitch_str = "—"
-        stat_cell(130, row2_cy, "last pitch", pitch_str)
+        stat_cell(130, atbat_row_cy, "last pitch", pitch_str)
 
-        # Win probability bar — centred in the bar, 200px wide
+        # Win probability bar
         wp_cx = self.width // 2
         wp_w = 220
         wp_h = 10
         wp_x0 = wp_cx - wp_w // 2
         wp_x1 = wp_cx + wp_w // 2
-        wp_y0 = row2_cy - wp_h // 2
-        wp_y1 = row2_cy + wp_h // 2
+        wp_y0 = atbat_row_cy - wp_h // 2
+        wp_y1 = atbat_row_cy + wp_h // 2
 
         if self.sb_win_prob_home_display is not None:
             home_prob = max(0.0, min(100.0, float(self.sb_win_prob_home_display)))
             away_prob = 100.0 - home_prob
-            # Background track
             self.canvas.create_rectangle(wp_x0, wp_y0, wp_x1, wp_y1,
                                          fill="#2c3e50", outline="#555", tags=tag)
-            # Away side (left)
             away_end = wp_x0 + int(wp_w * away_prob / 100)
             away_bar_col = team_color_for(away_name)[1] or "#3498db"
             if away_end > wp_x0:
                 self.canvas.create_rectangle(wp_x0, wp_y0, away_end, wp_y1,
                                              fill=away_bar_col, outline="", tags=tag)
-            # Home side (right)
             home_start = wp_x0 + int(wp_w * away_prob / 100)
             home_bar_col = team_color_for(home_name)[1] or "#e74c3c"
             if home_start < wp_x1:
                 self.canvas.create_rectangle(home_start, wp_y0, wp_x1, wp_y1,
                                              fill=home_bar_col, outline="", tags=tag)
-            # Probability labels above the bar
-            self.canvas.create_text(wp_x0, row2_cy - 12,
+            self.canvas.create_text(wp_x0, atbat_row_cy - 12,
                                     text=f"{away_name[:12]}  {away_prob:.0f}%",
                                     font=self.font_sb_label, fill="#cccccc",
                                     anchor="w", tags=tag)
-            self.canvas.create_text(wp_x1, row2_cy - 12,
+            self.canvas.create_text(wp_x1, atbat_row_cy - 12,
                                     text=f"{home_prob:.0f}%  {home_name[:12]}",
                                     font=self.font_sb_label, fill="#cccccc",
                                     anchor="e", tags=tag)
         else:
-            self.canvas.create_text(wp_cx, row2_cy,
+            self.canvas.create_text(wp_cx, atbat_row_cy,
                                     text="Win Probability: —",
                                     font=self.font_sb_label, fill="#888888",
                                     anchor="center", tags=tag)
@@ -1381,11 +1642,11 @@ class ScoreboardApp:
         # Batter AVG / OBP
         avg_str = self.sb_batter_avg if self.sb_batter_avg else ".---"
         obp_str = self.sb_batter_obp if self.sb_batter_obp else ".---"
-        stat_cell(self.width - 220, row2_cy, "AVG / OBP", f"{avg_str}  /  {obp_str}")
+        stat_cell(self.width - 220, atbat_row_cy, "AVG / OBP", f"{avg_str}  /  {obp_str}")
 
         # Pitcher pitch count
         pc_str = str(self.sb_pitch_count) if self.sb_pitch_count is not None else "—"
-        stat_cell(self.width - 80, row2_cy, "pitches", pc_str)
+        stat_cell(self.width - 80, atbat_row_cy, "pitches", pc_str)
 
     def start_fade(self, base_key, team_color, duration_ms=600, steps=8):
         """Starts a base fade animation (Must be called on main thread)."""
@@ -1440,9 +1701,6 @@ class ScoreboardApp:
         
         # only log B/S/O changes to avoid per-second spam
         current_state = (self.balls, self.strikes, self.outs)
-        if self.debug and self._last_log_state != current_state:
-            self.log(f"State counts — B:{self.balls} S:{self.strikes} O:{self.outs}", verbose=True)
-            self._last_log_state = current_state
             
         # Partial render for base fade animation and footer update
         self.render(full=False)
@@ -1450,9 +1708,9 @@ class ScoreboardApp:
 
     def fetch_and_schedule(self):
         """Fetches game data, updates state, and schedules GUI updates (Runs in background thread)."""
-        # This function runs in a background thread
         try:
             games = fetch_schedule(self.team_id)
+            self.log(f"Schedule fetched — {len(games)} game(s) in window", verbose=True, cat="POLL")
             # Fix #11: clear error flag on successful fetch
             with _STATE_LOCK:
                 self._fetch_error = False
@@ -1462,6 +1720,7 @@ class ScoreboardApp:
                 with _STATE_LOCK:
                     self._fetch_error = True
                     self._fetch_error_msg = "Schedule unavailable"
+                    self._set_poll_status("error")
             self.games = games
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             live_game = None
@@ -1538,10 +1797,19 @@ class ScoreboardApp:
                     with _STATE_LOCK:
                         self._fetch_error = True
                         self._fetch_error_msg = "Live feed unavailable"
+                        self._set_poll_status("error")
                 else:
                     with _STATE_LOCK:
                         self._fetch_error = False
                         self._fetch_error_msg = ""
+                    # ── Key event: game status change ─────────────────────────
+                    new_status = (feed.get("gameData", {}).get("status", {}).get("detailedState", "")) or ""
+                    if new_status and new_status != self._last_game_status:
+                        gd_t = feed.get("gameData", {}).get("teams", {}) or {}
+                        away_t = gd_t.get("away", {}).get("name", "Away")
+                        home_t = gd_t.get("home", {}).get("name", "Home")
+                        self.log(f"Game status: {self._last_game_status or '—'} → {new_status}  ({away_t} @ {home_t})", level="info", cat="GAME")
+                        self._last_game_status = new_status
                 self.live_feed = feed
                 # Fix #4: only invoke each recorder when its path is actually configured
                 if RECORD_FULL_PATH:
@@ -1559,9 +1827,13 @@ class ScoreboardApp:
                 new_ts = feed.get("metaData", {}).get("timeStamp")
                 if new_ts and new_ts == self._last_feed_timestamp:
                     feed_unchanged = True
-                    self.log(f"Feed timestamp unchanged ({new_ts}), skipping re-render.", verbose=True)
+                    self.log(f"Feed timestamp unchanged ({new_ts}), skipping re-render.", verbose=True, cat="POLL")
+                    with _STATE_LOCK:
+                        self._set_poll_status("unchanged")
                 else:
                     self._last_feed_timestamp = new_ts
+                    with _STATE_LOCK:
+                        self._set_poll_status("updated")
 
             if self.live_feed and not feed_unchanged:
                 # --- State Extraction and 3rd Out Logic ---
@@ -1654,7 +1926,7 @@ class ScoreboardApp:
                             break
                 except Exception as e:
                     if DEBUG:
-                        print(f"[DEBUG] Status bar stat extraction error: {e}")
+                        _log("DEBUG", "FEED", f"Status bar stat extraction error: {e}")
 
                 # --- Runner last names from linescore.offense ---
                 new_runner_names = {"1B": None, "2B": None, "3B": None}
@@ -1692,15 +1964,17 @@ class ScoreboardApp:
                     pass
 
                 with _STATE_LOCK:
-                    # Inning/Half Change Detection
+                    # ── Key event: inning / half-inning change ────────────────
                     if (curr_inning, curr_half) != (self._last_inning, self._last_inning_half):
                         self._inning_reset_done = False
+                        if curr_inning and curr_half:
+                            arrow = "▲" if str(curr_half).lower() == "top" else "▼"
+                            self.log(f"{arrow} Inning {curr_inning} ({curr_half})", level="info", cat="GAME")
                         self._last_inning = curr_inning
                         self._last_inning_half = curr_half
 
                     if raw_outs >= 3 and not self._inning_reset_done:
-                        # 3rd out detected: Trigger immediate base reset and set BSO to 0
-                        self.log("Third out detected — triggering counts/bases reset.", verbose=True)
+                        self.log("Third out — resetting counts and bases.", level="info", cat="GAME")
                         self.root.after(0, self.reset_after_third_out)
                         self.balls = 0
                         self.strikes = 0
@@ -1711,11 +1985,18 @@ class ScoreboardApp:
                         self.strikes = max(0, min(2, raw_strikes))
                         self.outs = max(0, min(2, raw_outs))
 
+                    # ── Key event: pitching change ────────────────────────────
+                    if new_pitcher not in ("Pitcher: -", "Pitcher: ") and new_pitcher != self.current_pitcher:
+                        old_p = self.current_pitcher.replace("Pitcher: ", "").strip() or "—"
+                        new_p = new_pitcher.replace("Pitcher: ", "").strip()
+                        if old_p != "—" and old_p != new_p:
+                            self.log(f"Pitching change: {old_p} → {new_p}", level="info", cat="GAME")
+
                     self.current_batter = new_batter
                     self.current_pitcher = new_pitcher
                     self.sb_last_pitch_speed = new_pitch_speed
                     self.sb_last_pitch_type = new_pitch_type
-                    # Smooth win probability: interpolate 20% toward new value per poll
+                    # Smooth win probability
                     if new_win_prob_home is not None:
                         self.sb_win_prob_home = new_win_prob_home
                         if self.sb_win_prob_home_display is None:
@@ -1727,14 +2008,142 @@ class ScoreboardApp:
                     self.sb_pitch_count = new_pitch_count
                     self.runner_names = new_runner_names
                     self.sb_weather = new_weather
-                    # Score flash: detect run increase and set flash counter (6 render cycles)
+
+                    # ── Key event: run(s) scored ──────────────────────────────
+                    gd_ev = (self.live_feed.get("gameData", {}).get("teams", {}) or {}) if self.live_feed else {}
+                    away_team = gd_ev.get("away", {}).get("name", "Away")
+                    home_team = gd_ev.get("home", {}).get("name", "Home")
                     if new_runs_away > self._prev_runs["away"]:
+                        diff = new_runs_away - self._prev_runs["away"]
+                        self.log(f"Run scored — {away_team} +{diff} (now {new_runs_away}-{new_runs_home})", level="info", cat="GAME")
                         self._score_flash["away"] = 6
                     if new_runs_home > self._prev_runs["home"]:
+                        diff = new_runs_home - self._prev_runs["home"]
+                        self.log(f"Run scored — {home_team} +{diff} (now {new_runs_away}-{new_runs_home})", level="info", cat="GAME")
                         self._score_flash["home"] = 6
                     self._prev_runs = {"away": new_runs_away, "home": new_runs_home}
-                
-                # --- Runner/Base Logic ---
+
+                # --- Marquee roster extraction ---
+                new_followed_roster = []
+                new_opponent_roster = []
+                try:
+                    current_play_m = self.live_feed.get("liveData", {}).get("plays", {}).get("currentPlay", {}) or {}
+                    matchup_m = current_play_m.get("matchup", {}) or {}
+                    gd_teams = self.live_feed.get("gameData", {}).get("teams", {}) or {}
+                    home_team_name = gd_teams.get("home", {}).get("name", "")
+                    followed = self.followed_team_name or ""
+                    followed_side = "home" if home_team_name == followed else "away"
+                    opponent_side = "away" if followed_side == "home" else "home"
+                    bs_teams = (self.live_feed.get("liveData", {}).get("boxscore", {}) or {}).get("teams", {})
+
+                    def build_roster(side):
+                        players = (bs_teams.get(side) or {}).get("players") or {}
+                        roster = []
+                        for pid, pdata in players.items():
+                            bo = pdata.get("battingOrder")
+                            if not bo:
+                                continue
+                            person    = pdata.get("person") or {}
+                            full_name = person.get("fullName", "")
+                            first     = person.get("firstName", "")
+                            last      = full_name.split()[-1] if full_name else ""
+                            initial   = (first[0] + ".") if first else ""
+                            display   = f"{initial} {last}".strip() if initial else last
+                            pos       = (pdata.get("position") or {}).get("abbreviation", "")
+                            entry_str = f"{display} {pos}".strip()
+                            roster.append({
+                                "str":       entry_str,
+                                "name_str":  display,
+                                "full_name": full_name,
+                                "order":     int(str(bo)[:1]),
+                            })
+                        roster.sort(key=lambda p: p["order"])
+                        return roster
+
+                    new_followed_roster = build_roster(followed_side)
+                    new_opponent_roster = build_roster(opponent_side)
+                except Exception as e:
+                    if DEBUG:
+                        _log("DEBUG", "FEED", f"Marquee roster extraction error: {e}")
+
+                with _STATE_LOCK:
+                    self.marquee_followed_roster = new_followed_roster
+                    self.marquee_opponent_roster = new_opponent_roster
+
+                # --- Followed team season stats (for not-live marquee) ---
+                new_season_stats = []
+                try:
+                    gd_teams2 = self.live_feed.get("gameData", {}).get("teams", {}) or {}
+                    home_name2 = gd_teams2.get("home", {}).get("name", "")
+                    followed2  = self.followed_team_name or ""
+                    f_side2    = "home" if home_name2 == followed2 else "away"
+                    bs_teams2  = (self.live_feed.get("liveData", {}).get("boxscore", {}) or {}).get("teams", {})
+                    players2   = (bs_teams2.get(f_side2) or {}).get("players") or {}
+
+                    batters  = []
+                    pitchers = []
+                    for pid, pdata in players2.items():
+                        person    = pdata.get("person") or {}
+                        full_name = person.get("fullName", "")
+                        first     = person.get("firstName", "")
+                        last      = full_name.split()[-1] if full_name else ""
+                        initial   = (first[0] + ".") if first else ""
+                        display   = f"{initial} {last}".strip() if initial else last
+                        pos       = (pdata.get("position") or {}).get("abbreviation", "")
+                        ss        = pdata.get("seasonStats") or {}
+                        bo        = pdata.get("battingOrder")
+
+                        if bo:
+                            # Position player — skip if no meaningful batting stats
+                            bat = ss.get("batting") or {}
+                            avg = bat.get("avg")
+                            hr  = bat.get("homeRuns")
+                            rbi = bat.get("rbi")
+                            # Consider stats absent if avg is missing or is the placeholder ".000"
+                            has_stats = (avg is not None and avg not in (".000", "0.000", "-.---", ".---")
+                                         or (hr is not None and int(hr) > 0)
+                                         or (rbi is not None and int(rbi) > 0))
+                            if not has_stats:
+                                continue
+                            avg_str = avg if avg else ".---"
+                            hr_str  = str(hr) if hr is not None else "-"
+                            rbi_str = str(rbi) if rbi is not None else "-"
+                            entry_str = f"{display} {pos}  {avg_str}  {hr_str}HR  {rbi_str}RBI"
+                            batters.append({
+                                "str":        entry_str,
+                                "name_str":   display,
+                                "full_name":  full_name,
+                                "order":      int(str(bo)[:1]),
+                                "is_pitcher": False,
+                            })
+                        else:
+                            # Pitcher — only include if they have real pitching stats
+                            pit  = ss.get("pitching") or {}
+                            wins = pit.get("wins")
+                            era  = pit.get("era")
+                            has_stats = (era is not None and era not in ("-.--", "0.00", "-")
+                                         and not (wins == 0 and era in ("0.00", "-.--")))
+                            if not has_stats:
+                                continue
+                            wins_str = str(wins) if wins is not None else "-"
+                            era_str  = str(era)
+                            entry_str = f"{display} {pos}  {wins_str}W  {era_str} ERA"
+                            pitchers.append({
+                                "str":        entry_str,
+                                "name_str":   display,
+                                "full_name":  full_name,
+                                "order":      999,
+                                "is_pitcher": True,
+                            })
+
+                    batters.sort(key=lambda p: p["order"])
+                    new_season_stats = batters + pitchers
+                except Exception as e:
+                    if DEBUG:
+                        _log("DEBUG", "FEED", f"Season stats extraction error: {e}")
+
+                with _STATE_LOCK:
+                    self.followed_season_stats = new_season_stats
                 
                 # 1. Reset base state (in the current thread)
                 for k in self.bases:
@@ -1756,7 +2165,7 @@ class ScoreboardApp:
                             self.bases[bkey]["runner_name"] = None
                 except Exception:
                     if DEBUG:
-                        print("[DEBUG] Error processing linescore.offense for base occupancy.", threading.get_ident())
+                        _log("DEBUG", "FEED", f"Error processing linescore.offense for base occupancy (thread {threading.get_ident()})")
                 
                 # 3. Check occupancy changes to trigger base fade/runner spawn
                 for b in ("1B", "2B", "3B"):
@@ -1819,11 +2228,11 @@ class ScoreboardApp:
 
                 except Exception:
                     if DEBUG:
-                        print("[DEBUG] Error processing currentPlay.runners for animations.", threading.get_ident())
+                        _log("DEBUG", "UI", f"Error processing currentPlay.runners for animations (thread {threading.get_ident()})")
                 
                 now = time.time()
                 if now - self._last_poll_time > 5:
-                    self.log("Successfully polled feed and updated state", verbose=True)
+                    self.log("Successfully polled feed and updated state", verbose=True, cat="POLL")
                     self._last_poll_time = now
             else:
                 # No live feed - clear BSO/names/bases
@@ -1863,7 +2272,7 @@ class ScoreboardApp:
                     new_poll_interval = pre_game_poll
 
                 if self.debug:
-                    self.log(f"Next game in: {self.format_seconds_to_dhms_string(time_to_next)} ({time_to_next:.0f}s). Poll interval: {new_poll_interval}s.", verbose=True)
+                    self.log(f"Next game in: {self.format_seconds_to_dhms_string(time_to_next)} ({time_to_next:.0f}s). Poll interval: {new_poll_interval}s.", verbose=True, cat="POLL")
 
             else:
                 # No next game found
@@ -1896,7 +2305,7 @@ class ScoreboardApp:
         self.clear_all_runners()
         self._outs_reset_pending = False
         self._inning_reset_done = True # Keep this true until next half-inning change is detected
-        self.log("Bases and runners cleared after 3rd out", level="info")
+        self.log("Bases and runners cleared after 3rd out", level="info", cat="GAME")
         # Ensure a render happens to show the cleared bases
         self.render_full_gui()
 
@@ -1906,13 +2315,13 @@ def main():
     # --- Ctrl+C Signal Handler ---
     def sigint_handler(signum, frame):
         """Handles SIGINT (Ctrl+C) for clean exit."""
-        print("\n\n[INFO] Caught Ctrl+C. Shutting down gracefully...")
-        # Check app.running_fetch state before quitting
+        print(f"\n{_ts()} [INFO/APP] Caught Ctrl+C. Shutting down gracefully...")
         if app.running_fetch:
-            print("[INFO] Waiting for ongoing fetch thread to finish...")
+            print(f"{_ts()} [INFO/APP] Waiting for ongoing fetch thread to finish...")
         
         # Shutdown the executor to prevent new tasks
         app.executor.shutdown(wait=False)
+        app._marquee_stop()
         root.quit()
 
     signal.signal(signal.SIGINT, sigint_handler)
@@ -1921,6 +2330,7 @@ def main():
     app = ScoreboardApp(root)
     # Fix #9: reflect the followed team in the window title
     root.title(f"{app.followed_team_name} — MLB Scoreboard")
+    print(f"{_ts()} [INFO/APP] MLB Scoreboard started — following {app.followed_team_name}")
     
     try:
         root.mainloop()
