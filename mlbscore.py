@@ -480,7 +480,6 @@ class ScoreboardApp:
         self.font_sb_label = tkfont.Font(family=self.font_family, size=8)
         self.font_sb_value = tkfont.Font(family=self.font_family, size=11, weight="bold")
         self.font_score_big = tkfont.Font(family=self.font_family, size=36, weight="bold")
-        self.font_clock = tkfont.Font(family=self.font_family, size=10)
         self.font_marquee = tkfont.Font(family=self.font_family, size=10)
 
         # ThreadPoolExecutor for network operations
@@ -1030,11 +1029,6 @@ class ScoreboardApp:
             # Title
             title_text = f"{self.followed_team_name} — MLB Scoreboard"
             self.canvas.create_text(self.width // 2, 22, text=title_text, font=self.font_title, fill=self.accent)
-
-            # Clock (top-right corner)
-            now_str = datetime.datetime.now().strftime("%I:%M %p")
-            self.canvas.create_text(self.width - 12, 12, text=now_str,
-                                    font=self.font_clock, fill=self.fg, anchor="ne")
 
             # Large live score display (top-right area, only when live)
             is_live_score = False
