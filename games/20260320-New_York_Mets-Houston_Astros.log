@@ -1,0 +1,2 @@
+{"meta": true, "timestamp": "2026-03-20T16:53:12.521942", "gamePk": 831500, "home": "Houston Astros", "away": "New York Mets", "venue": "CACTI Park of the Palm Beaches", "description": "MLB Scoreboard recording session", "mode": "event"}
+{"timestamp": "2026-03-20T16:53:12.521942", "delta_t": 0, "gamePk": 831500, "state": "Final", "inning": 9, "halfInning": "Bottom", "outs": 3, "balls": 1, "strikes": 2, "bases": {"first": false, "second": false, "third": false}, "batter": "Carlos P\u00e9rez", "pitcher": "Richard Lovelady"}

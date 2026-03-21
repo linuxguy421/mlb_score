@@ -242,6 +242,7 @@ _LIVE_FEED_FIELDS = (
     "liveData,plays,currentPlay,count,balls,"
     "liveData,plays,currentPlay,count,strikes,"
     "liveData,plays,currentPlay,count,pitches,"
+    "liveData,plays,currentPlay,result,description,"
     "liveData,plays,currentPlay,matchup,batter,fullName,"
     "liveData,plays,currentPlay,matchup,pitcher,fullName,"
     "liveData,plays,currentPlay,runners,"
@@ -255,8 +256,10 @@ _LIVE_FEED_FIELDS = (
     "liveData,plays,currentPlay,playEvents,isPitch,"
     "liveData,plays,currentPlay,playEvents,pitchNumber,"
     # Win probability
-    "liveData,plays,currentPlay,winProbability,"
-    "liveData,plays,currentPlay,winProbability,homeTeamWinProbability,"
+    "gameData,teams,home,record,wins,"
+    "gameData,teams,home,record,losses,"
+    "gameData,teams,away,record,wins,"
+    "gameData,teams,away,record,losses,"
     # Boxscore for batter season AVG/OBP and pitcher pitch count
     "liveData,boxscore,"
     "liveData,boxscore,teams,"
@@ -454,8 +457,9 @@ class ScoreboardApp:
         self.fg = CANVAS_CFG.get("fg_color", "#eaeaea")
         self.accent = CANVAS_CFG.get("accent", "#FFD700")
         self.font_family = CANVAS_CFG.get("font_family", "Courier")
-        self.STATUS_BAR_H_LIVE = 84   # three-row height when a game is live (adds marquee row)
-        self.STATUS_BAR_H      = 56   # two-row height when not live
+        # STATUS_BAR_H values are set by _compute_layout() — initialise with defaults
+        self.STATUS_BAR_H_LIVE = 112
+        self.STATUS_BAR_H      = 56
 
         self.canvas = tk.Canvas(root, width=self.width, height=self.height,
                                 bg=self.bg, highlightthickness=0)
@@ -463,6 +467,9 @@ class ScoreboardApp:
 
         # Fix #10: recalculate layout dimensions when window is resized
         self.canvas.bind("<Configure>", self._on_canvas_resize)
+        self.root.bind("<F11>", self._toggle_fullscreen)
+        self.root.bind("<Escape>", lambda e: self._set_fullscreen(False))
+        self.root.bind("<F5>", self._manual_refresh)
 
         # Fix #11: track fetch errors to surface them in the UI
         self._fetch_error = False
@@ -479,7 +486,6 @@ class ScoreboardApp:
         self.font_status = tkfont.Font(family=self.font_family, size=12, weight="bold")
         self.font_sb_label = tkfont.Font(family=self.font_family, size=8)
         self.font_sb_value = tkfont.Font(family=self.font_family, size=11, weight="bold")
-        self.font_score_big = tkfont.Font(family=self.font_family, size=36, weight="bold")
         self.font_marquee = tkfont.Font(family=self.font_family, size=10)
 
         # ThreadPoolExecutor for network operations
@@ -494,6 +500,10 @@ class ScoreboardApp:
         self.poll_interval = self.polling.get("none", 3600)
         self.next_update_in = 0
         self.running_fetch = False
+
+        # base path pulse animations: list of active pulse dicts
+        # each: {segments: [(p1,p2),...], seg_idx: int, t: float, color: str, after_id: int|None}
+        self._path_pulses = []
 
         # base state
         self.bases = {
@@ -516,8 +526,12 @@ class ScoreboardApp:
         # Status bar state
         self.sb_last_pitch_speed = None   # float mph
         self.sb_last_pitch_type = None    # str e.g. "4-Seam Fastball"
-        self.sb_win_prob_home = None      # float 0-100
-        self.sb_win_prob_home_display = None  # smoothed display value
+        self.sb_away_record = None    # str e.g. "15-12 (.556)"
+        self.sb_home_record = None    # str e.g. "13-14 (.481)"
+        self.sb_last_play = None      # str — last play result description
+        self.sb_last_play_set_at = 0.0  # timestamp when sb_last_play was last updated
+        self.sb_event_msg = None      # str — transient event override (challenge, delay, etc.)
+        self.sb_event_msg_set_at = 0.0  # timestamp when event_msg was set
         self.sb_batter_avg = None         # str e.g. ".285"
         self.sb_batter_obp = None         # str e.g. ".350"
         self.sb_pitch_count = None        # int total pitches thrown by current pitcher
@@ -531,8 +545,6 @@ class ScoreboardApp:
         self._marquee_canvas_id = None  # canvas item id for the scrolling text
         self._marquee_is_live = False   # tracks live/not-live for string rebuild
         self._marquee_active = False    # True only while live
-        self._marquee_batter_span = None
-        self._marquee_pitcher_span = None
 
         # Roster for marquee: list of dicts per team [{name, pos, is_batter, is_pitcher}, ...]
         self.marquee_followed_roster = []
@@ -567,16 +579,27 @@ class ScoreboardApp:
         self._last_inning = None
         self._last_inning_half = None
 
-        # layout caches
-        self.left_margin = 60
-        self.top_margin = 60
-        self.score_start_x = 320
-        self.col_width = 44
-        self.row_height = 42
-        self.diamond_cx = None
-        self.diamond_cy = None
-        self.diamond_ds = None
+        # layout caches — all derived by _compute_layout() from canvas size
+        self.left_margin   = 0
+        self.top_margin    = 0
+        self.score_start_x = 0
+        self.col_width     = 0
+        self.row_height    = 0
+        self.header_half   = 0   # half-height of header/row cells
+        self.diamond_cx    = None
+        self.diamond_cy    = None
+        self.diamond_ds    = None
+        self.bso_zone_left  = 0
+        self.bso_zone_right = 0
+        self.bso_spacing    = 0
+        self.bso_sz         = 0
+        self.base_half     = 0
         self.base_positions = {}
+
+        # fullscreen state
+        self._is_fullscreen = False
+
+        self._compute_layout()
 
         # initial loop
         self.root.after(100, self.update_loop)
@@ -586,18 +609,111 @@ class ScoreboardApp:
         self._last_runner_state = {}
         # Timestamp-based skip-render: store last seen metaData.timeStamp from live feed
         self._last_feed_timestamp = None
+        # Track whether the last poll returned unchanged data — suppresses diamond/BSO redraw
+        self._feed_unchanged = False
         # Track last known game status for change detection
         self._last_game_status = ""
 
+    def _compute_layout(self):
+        """Derive every layout constant proportionally from current canvas size.
+        Call at startup and on every resize before rendering."""
+        w, h = self.width, self.height
+        ff   = self.font_family
+
+        # ── Margins ────────────────────────────────────────────────────────────
+        self.left_margin  = max(16, int(w * 0.042))
+        self.top_margin   = max(36, int(h * 0.082))
+        self.header_half  = max(14, int(h * 0.028))   # ½ height of header/row cells
+
+        # ── Scoreboard grid ─────────────────────────────────────────────────────
+        # team-name column ends at ~26% of width
+        self.score_start_x = max(160, int(w * 0.26))
+        max_cols = UI_CFG.get("max_innings", 9) + 4   # innings + R H E icon
+        avail    = w - self.score_start_x - 20
+        self.col_width  = max(24, avail // max_cols)
+        self.row_height = max(24, int(h * 0.063))
+
+        # ── Font sizes (scale with canvas height) ───────────────────────────────
+        def _fs(ratio, lo):
+            return max(lo, int(h * ratio))
+
+        sizes = {
+            "font_title":   (_fs(0.028, 10), "bold"),
+            "font_header":  (_fs(0.018, 8),  "bold"),
+            "font_team":    (_fs(0.020, 8),  "bold"),
+            "font_small":   (_fs(0.016, 7),  "normal"),
+            "font_status":  (_fs(0.020, 8),  "bold"),
+            "font_sb_label":(_fs(0.013, 6),  "normal"),
+            "font_sb_value":(_fs(0.017, 7),  "bold"),
+            "font_marquee": (_fs(0.016, 7),  "normal"),
+        }
+        for attr, (sz, wt) in sizes.items():
+            f = getattr(self, attr, None)
+            if f:
+                f.configure(family=ff, size=sz, weight=wt)
+
+        # ── Status bar heights ──────────────────────────────────────────────────
+        self.STATUS_BAR_H_LIVE = max(72, int(h * 0.17))
+        self.STATUS_BAR_H      = max(36, int(h * 0.085))
+
+        # ── Diamond ─────────────────────────────────────────────────────────────
+        # Grid bottom — must match render()'s grid_bottom = top_margin - hh + row_height*3
+        grid_bot = self.top_margin - self.header_half + self.row_height * 3
+
+        # Space between grid bottom and status bar top
+        body_h   = h - grid_bot - self.STATUS_BAR_H_LIVE
+        body_w   = int(w * 0.52)   # diamond lives in left ~52% of canvas
+
+        # diamond_ds = half-diagonal; fit tightly inside available area
+        ds_from_h = int(body_h * 0.38)
+        ds_from_w = int(body_w * 0.23)
+        self.diamond_ds = max(30, min(ds_from_h, ds_from_w))
+        ds = self.diamond_ds
+
+        self.diamond_cx = self.left_margin + int(body_w * 0.38)
+        self.diamond_cy = grid_bot + max(ds + 10, body_h // 2)
+
+        # ── Base squares ───────────────────────────────────────────────────────
+        self.base_half = max(8, int(ds * 0.155))
+
+        # base_positions derived purely from geometry — kept current even when
+        # _skip_dynamic suppresses the diamond redraw, so pulse animations work
+        inset = ds * 0.6
+        self.base_positions = {
+            "2B":   (self.diamond_cx,         self.diamond_cy - inset),
+            "1B":   (self.diamond_cx + inset, self.diamond_cy),
+            "3B":   (self.diamond_cx - inset, self.diamond_cy),
+            "Home": (self.diamond_cx,         self.diamond_cy + inset),
+        }
+
+        # ── BSO panel — left-anchored from right edge of diamond ──────────────
+        diamond_right       = self.diamond_cx + ds
+        self.bso_zone_left  = diamond_right
+        self.bso_zone_right = w
+        self.bso_spacing    = max(14, int(ds * 0.25))
+        self.bso_sz         = max(5,  int(ds * 0.085))
+
+    def _toggle_fullscreen(self, event=None):
+        self._set_fullscreen(not self._is_fullscreen)
+
+    def _set_fullscreen(self, state):
+        self._is_fullscreen = bool(state)
+        self.root.attributes("-fullscreen", self._is_fullscreen)
+
+    def _manual_refresh(self, event=None):
+        """F5 — reset poll timer to zero so update_loop triggers an immediate fetch."""
+        if not self.running_fetch:
+            with _STATE_LOCK:
+                self.next_update_in = 0
+            self.log("Manual refresh triggered (F5)", level="info", cat="POLL")
+
     def _on_canvas_resize(self, event):
-        """Fix #10: Update tracked width/height when the window is resized and trigger a full redraw."""
-        new_w = event.width
-        new_h = event.height
+        """Update size, recompute all layout, trigger full redraw."""
+        new_w, new_h = event.width, event.height
         if new_w != self.width or new_h != self.height:
-            self.width = new_w
+            self.width  = new_w
             self.height = new_h
-            # Recompute proportional layout anchors
-            self.score_start_x = max(200, int(new_w * 0.30))
+            self._compute_layout()
             self.render_full_gui()
 
     def log(self, *args, verbose=False, level="info", cat="APP"):
@@ -633,10 +749,7 @@ class ScoreboardApp:
     # ── Marquee scroller ──────────────────────────────────────────────────────
 
     def _build_marquee_string(self):
-        """
-        Build the full marquee scroll string.
-        Returns (full_str, batter_span, pitcher_span).
-        """
+        """Build the full marquee scroll string."""
         sep = "   •   "
         followed_name = self.followed_team_name or "TEAM"
 
@@ -653,42 +766,22 @@ class ScoreboardApp:
                 home_n = gd.get("home", {}).get("name", "")
                 away_n = gd.get("away", {}).get("name", "")
                 opp_name = away_n if home_n == followed_name else home_n
-
             followed_body = sep.join(p["str"] for p in self.marquee_followed_roster)
             opponent_body = sep.join(p["str"] for p in self.marquee_opponent_roster)
-            full = (f"{followed_name.upper()} ► {followed_body}"
-                    f"          ⚾          "
+            return (f"{followed_name.upper()} ► {followed_body}"
+                    f"          ---          "
                     f"{opp_name.upper()} ► {opponent_body}")
-
-            batter_fn  = self.current_batter.replace("Batter: ", "").strip()
-            pitcher_fn = self.current_pitcher.replace("Pitcher: ", "").strip()
-            batter_span = pitcher_span = None
-            for p in self.marquee_followed_roster + self.marquee_opponent_roster:
-                idx = full.find(p["str"])
-                if idx < 0:
-                    continue
-                if p["full_name"] == batter_fn:
-                    batter_span = (idx, idx + len(p["str"]))
-                if p["full_name"] == pitcher_fn:
-                    pitcher_span = (idx, idx + len(p["str"]))
-
-            return full, batter_span, pitcher_span
-
         else:
             if not self.followed_season_stats:
-                full = f"{followed_name.upper()} ► No stats available"
-                return full, None, None
+                return f"{followed_name.upper()} ► No stats available"
             body = sep.join(p["str"] for p in self.followed_season_stats)
-            full = f"{followed_name.upper()} ►  {body}"
-            return full, None, None
+            return f"{followed_name.upper()} ►  {body}"
 
     def _marquee_start(self):
         """Build the marquee string and start the scroll tick if not already running."""
-        text, b_span, p_span = self._build_marquee_string()
-        self._marquee_text         = text
-        self._marquee_text_w       = self.font_marquee.measure(text)
-        self._marquee_batter_span  = b_span
-        self._marquee_pitcher_span = p_span
+        text = self._build_marquee_string()
+        self._marquee_text   = text
+        self._marquee_text_w = self.font_marquee.measure(text)
 
         if not self._marquee_active:
             self._marquee_x      = self.width
@@ -722,7 +815,7 @@ class ScoreboardApp:
             return
 
         sbh     = self.STATUS_BAR_H_LIVE
-        row_h   = sbh // 3
+        row_h   = sbh // 4
         bar_top = self.height - sbh
         row_cy  = bar_top + row_h // 2
 
@@ -732,11 +825,9 @@ class ScoreboardApp:
         if self._marquee_x < -self._marquee_text_w:
             self._marquee_x = self.width
 
-        if self._marquee_canvas_id:
-            try:
-                self.canvas.delete(self._marquee_canvas_id)
-            except Exception:
-                pass
+        # Delete all marquee items from the previous tick
+        self.canvas.delete("marquee")
+        self._marquee_canvas_id = None
 
         self._marquee_canvas_id = self.canvas.create_text(
             int(self._marquee_x), row_cy,
@@ -746,28 +837,6 @@ class ScoreboardApp:
             anchor="nw",
             tags="marquee"
         )
-
-        # Highlight segments for batter (gold) and pitcher (cyan)
-        x_offset = int(self._marquee_x)
-        for span, color in (
-            (self._marquee_batter_span,  self.accent),
-            (self._marquee_pitcher_span, "#00e5ff"),
-        ):
-            if span is None:
-                continue
-            pre_w    = self.font_marquee.measure(self._marquee_text[:span[0]])
-            seg_text = self._marquee_text[span[0]:span[1]]
-            seg_x    = x_offset + pre_w
-            seg_w    = self.font_marquee.measure(seg_text)
-            if seg_x + seg_w > 0 and seg_x < self.width:
-                self.canvas.create_text(
-                    seg_x, row_cy,
-                    text=seg_text,
-                    font=self.font_marquee,
-                    fill=color,
-                    anchor="nw",
-                    tags="marquee"
-                )
 
         self._marquee_after_id = self.root.after(33, self._marquee_tick)
 
@@ -787,12 +856,11 @@ class ScoreboardApp:
         }
 
     def spawn_runner_at_base(self, base_key, color=None):
-        """Spawns a static runner icon at a base."""
-        # Only perform GUI ops on main thread, but this is designed to be called via root.after(0, ...)
+        """Spawns a runner icon at a base."""
         if threading.current_thread() != threading.main_thread():
-             self.log(f"Spawn requested for {base_key} from non-main thread. Scheduling...", verbose=True, cat="UI")
-             self.root.after(0, lambda: self.spawn_runner_at_base(base_key, color))
-             return
+            self.log(f"Spawn requested for {base_key} from non-main thread. Scheduling...", verbose=True, cat="UI")
+            self.root.after(0, lambda: self.spawn_runner_at_base(base_key, color))
+            return
 
         if base_key == "Home" or base_key in self.runners_by_base:
             return None
@@ -802,23 +870,25 @@ class ScoreboardApp:
             return None
         bx, by = pos
         color = color or self.accent
+        r = max(10, int(self.diamond_ds * 0.13))  # radius scales with diamond
         rkey = f"r{self._next_runner_key}"
         self._next_runner_key += 1
-        # Runner is a simple circle on the canvas
-        cid = self.canvas.create_oval(bx - 8, by - 8, bx + 8, by + 8,
-                                      fill=color, outline="white", width=2)
-        self.runners[rkey] = {"cid": cid, "base": base_key, "color": color}
+        cid = self.canvas.create_oval(bx - r, by - r, bx + r, by + r,
+                                      fill=color, outline="white", width=3,
+                                      tags="runner_dot")
+        self.runners[rkey] = {"cid": cid, "base": base_key, "color": color, "r": r}
         self.runners_by_base[base_key] = rkey
         self.log(f"Runner spawned: {rkey} at {base_key}", verbose=True, cat="UI")
+        # Pulse the base glow on arrival
+        self.root.after(0, lambda: self._pulse_base_glow(base_key, color))
         return rkey
 
-    def move_runner_base(self, from_base, to_base, color=None, steps=12):
+    def move_runner_base(self, from_base, to_base, color=None, steps=30):
         """Handles runner movement with animation and base state updates."""
-        # Only perform GUI ops on main thread, but this is designed to be called via root.after(0, ...)
         if threading.current_thread() != threading.main_thread():
-             self.log(f"Move requested for {from_base} to {to_base} from non-main thread. Scheduling...", verbose=True, cat="UI")
-             self.root.after(0, lambda: self.move_runner_base(from_base, to_base, color, steps))
-             return
+            self.log(f"Move requested for {from_base} to {to_base} from non-main thread. Scheduling...", verbose=True, cat="UI")
+            self.root.after(0, lambda: self.move_runner_base(from_base, to_base, color, steps))
+            return
 
         rkey = self.runners_by_base.pop(from_base, None)
         runner = self.runners.get(rkey)
@@ -826,21 +896,20 @@ class ScoreboardApp:
         if not rkey or not runner:
             self.log(f"Move requested from {from_base} but no runner found/present.", verbose=True, cat="UI")
             if to_base != "Home":
-                # Fallback: if a runner was missed/wasn't animated, ensure it's at the destination
                 return self.spawn_runner_at_base(to_base, color=color or self.accent)
             return None
 
         self.compute_base_positions()
         start = self.base_positions.get(from_base)
-        end = self.base_positions.get(to_base)
+        end   = self.base_positions.get(to_base)
         color = runner.get("color", self.accent)
+        r     = runner.get("r", max(10, int(self.diamond_ds * 0.13)))
 
-        # Clear old canvas object and pop runner from self.runners immediately
         try:
             self.canvas.delete(runner["cid"])
         except Exception:
             pass
-        self.runners.pop(rkey, None) # Runner is now represented by the animation object
+        self.runners.pop(rkey, None)
 
         if not start or not end:
             self.log(f"Error: Base positions unknown for {from_base} or {to_base}. Spawning at destination.", level="error", cat="UI")
@@ -853,51 +922,256 @@ class ScoreboardApp:
         dx = (tx - sx) / float(steps)
         dy = (ty - sy) / float(steps)
 
-        # Create the temporary moving object
-        temp_cid = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, fill=color, outline="white", width=2)
+        # Larger, brighter moving dot with a white trailing glow outline
+        temp_cid = self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r,
+                                           fill=color, outline="#ffffff", width=3,
+                                           tags="runner_dot")
+        # Outer glow ring
+        glow_cid = self.canvas.create_oval(sx - r - 4, sy - r - 4,
+                                            sx + r + 4, sy + r + 4,
+                                            fill="", outline=color, width=2,
+                                            tags="runner_dot")
 
         def _step(i=0):
             if i >= steps:
-                self.canvas.delete(temp_cid)
+                try:
+                    self.canvas.delete(temp_cid)
+                    self.canvas.delete(glow_cid)
+                except Exception:
+                    pass
                 if to_base != "Home":
-                    # Spawn the static runner at the new base
                     new_key = self.spawn_runner_at_base(to_base, color=color)
                     self.log(f"Runner moved: {rkey} {from_base} -> {to_base} as {new_key}", verbose=True, cat="UI")
                 else:
-                    # Runner scored, do the fade out animation
-                    shrink_id = self.canvas.create_oval(tx - 8, ty - 8, tx + 8, ty + 8, fill=color, outline="white", width=2)
-                    def _shrink(step=0, maxs=6):
-                        if step >= maxs:
-                            try:
-                                self.canvas.delete(shrink_id)
-                            except Exception:
-                                pass
-                            return
-                        scale = 1 - (step / float(maxs))
-                        w = int(8 * scale)
-                        self.canvas.coords(shrink_id, tx - w, ty - w, tx + w, ty + w)
-                        self.root.after(40, lambda: _shrink(step + 1, maxs))
-                    _shrink()
+                    # Scored — gold flash at home plate fading over 2s
+                    self._flash_score_at_home(tx, ty, color)
                     self.log(f"Runner {rkey} scored at Home", verbose=True, cat="UI")
-                # Force a full render to reflect the new state (e.g., cleared base/runner)
                 self.render_full_gui()
                 return
 
             try:
                 self.canvas.move(temp_cid, dx, dy)
+                self.canvas.move(glow_cid, dx, dy)
             except Exception:
-                # Handle error if canvas object is deleted mid-animation
                 pass
-            
-            # Always schedule GUI updates using self.root.after in animation
             self.root.after(30, lambda: _step(i + 1))
 
         _step()
         return rkey
 
+    # Base path: diamond order used to build movement segments
+    _BASE_ORDER = ["Home", "1B", "2B", "3B", "Home"]
+
+    def _pulse_base_glow(self, base_key, color, pulses=10, period_ms=500):
+        """Draw a repeating glow ring around a base on runner arrival (10 pulses × 500ms = 5s)."""
+        pos = self.base_positions.get(base_key)
+        if not pos:
+            return
+        bx, by = pos
+        r_base = max(10, int(self.diamond_ds * 0.13))
+        glow_id = self.canvas.create_oval(
+            bx - r_base - 6, by - r_base - 6,
+            bx + r_base + 6, by + r_base + 6,
+            fill="", outline=color, width=3, tags="runner_dot"
+        )
+
+        def _fade(step=0, max_steps=10):
+            if step >= max_steps:
+                try:
+                    self.canvas.delete(glow_id)
+                except Exception:
+                    pass
+                return
+            alpha = 1.0 - (step / float(max_steps))
+            faded = blend_colors(color, self.bg, 1.0 - alpha)
+            try:
+                self.canvas.itemconfig(glow_id, outline=faded)
+            except Exception:
+                pass
+            self.root.after(period_ms // max_steps, lambda: _fade(step + 1, max_steps))
+
+        def _pulse(n=0):
+            if n >= pulses:
+                try:
+                    self.canvas.delete(glow_id)
+                except Exception:
+                    pass
+                return
+            try:
+                self.canvas.itemconfig(glow_id, outline=color)
+            except Exception:
+                return
+            # Fade out over one period, then repeat
+            steps = 10
+            ms_per = period_ms // steps
+
+            def _step_fade(s=0):
+                if s >= steps:
+                    self.root.after(50, lambda: _pulse(n + 1))
+                    return
+                alpha = 1.0 - (s / float(steps))
+                faded = blend_colors(color, self.bg, 1.0 - alpha)
+                try:
+                    self.canvas.itemconfig(glow_id, outline=faded, width=max(1, int(3 * alpha)))
+                except Exception:
+                    return
+                self.root.after(ms_per, lambda: _step_fade(s + 1))
+
+            _step_fade()
+
+        _pulse()
+
+    def _flash_score_at_home(self, hx, hy, color, duration_ms=2000):
+        """Gold expanding ring + shrinking dot at home plate when a runner scores."""
+        r = max(10, int(self.diamond_ds * 0.13))
+        # Expanding gold ring
+        ring_id = self.canvas.create_oval(
+            hx - r, hy - r, hx + r, hy + r,
+            fill="", outline="#FFD700", width=4, tags="runner_dot"
+        )
+        # Filled dot in team colour
+        dot_id = self.canvas.create_oval(
+            hx - r, hy - r, hx + r, hy + r,
+            fill=color, outline="white", width=3, tags="runner_dot"
+        )
+
+        steps = 20
+        ms_per = duration_ms // steps
+
+        def _anim(s=0):
+            if s >= steps:
+                for cid in (ring_id, dot_id):
+                    try:
+                        self.canvas.delete(cid)
+                    except Exception:
+                        pass
+                return
+            t = s / float(steps)
+            # Ring expands outward
+            rr = r + int(r * 2.5 * t)
+            ring_col = blend_colors("#FFD700", self.bg, t)
+            try:
+                self.canvas.coords(ring_id, hx - rr, hy - rr, hx + rr, hy + rr)
+                self.canvas.itemconfig(ring_id, outline=ring_col, width=max(1, int(4 * (1 - t))))
+            except Exception:
+                pass
+            # Dot shrinks
+            rd = max(1, int(r * (1.0 - t)))
+            dot_col = blend_colors(color, self.bg, t)
+            try:
+                self.canvas.coords(dot_id, hx - rd, hy - rd, hx + rd, hy + rd)
+                self.canvas.itemconfig(dot_id, fill=dot_col)
+            except Exception:
+                pass
+            self.root.after(ms_per, lambda: _anim(s + 1))
+
+        _anim()
+
+    def animate_base_path(self, from_base, to_base, color=None):
+        """
+        Animate a travelling pulse along the base path lines.
+        Loops enough times to fill 5–15 seconds.
+        """
+        if threading.current_thread() != threading.main_thread():
+            self.root.after(0, lambda: self.animate_base_path(from_base, to_base, color))
+            return
+
+        self.log(f"animate_base_path: {from_base} → {to_base}", verbose=True, cat="UI")
+
+        order = self._BASE_ORDER
+        try:
+            fi = order.index(from_base)
+            ti = order.index(to_base, fi + 1)
+        except ValueError:
+            return
+
+        segments = [(order[i], order[i + 1]) for i in range(fi, ti)]
+        if not segments:
+            return
+
+        # Each segment takes ms_per_seg ms; clamp total to 5000–15000ms
+        ms_per_seg  = 400                      # ms for one segment traversal
+        total_segs  = len(segments)
+        one_pass_ms = total_segs * ms_per_seg
+        min_passes  = max(1, -(-5000 // one_pass_ms))    # ceil(5000 / one_pass_ms)
+        max_passes  = max(min_passes, 15000 // one_pass_ms)
+        passes      = min_passes   # always run at least enough for 5s; cap at 15s max
+        passes      = min(passes, max_passes)
+
+        pulse = {
+            "segments":  segments,
+            "seg_idx":   0,
+            "t":         0.0,
+            "passes_left": passes,
+            "color":     color or self.accent,
+            "cid":       None,
+            "after_id":  None,
+            "ms_per_seg": ms_per_seg,
+        }
+        self._path_pulses.append(pulse)
+        self._pulse_tick(pulse)
+
+    def _pulse_tick(self, pulse):
+        """Advance one pulse frame. ~30fps, duration controlled by ms_per_seg."""
+        if pulse not in self._path_pulses:
+            return
+
+        fps    = 30
+        ms_per_seg = pulse.get("ms_per_seg", 400)
+        dt     = 1.0 / (ms_per_seg / (1000.0 / fps))   # progress per tick
+
+        pulse["t"] += dt
+        if pulse["t"] >= 1.0:
+            pulse["t"] = 0.0
+            pulse["seg_idx"] += 1
+            if pulse["seg_idx"] >= len(pulse["segments"]):
+                # Completed one pass
+                pulse["passes_left"] -= 1
+                if pulse["passes_left"] <= 0:
+                    if pulse["cid"]:
+                        try:
+                            self.canvas.delete(pulse["cid"])
+                        except Exception:
+                            pass
+                    if pulse in self._path_pulses:
+                        self._path_pulses.remove(pulse)
+                    return
+                pulse["seg_idx"] = 0   # loop back to start
+
+        seg = pulse["segments"][pulse["seg_idx"]]
+        p1  = self.base_positions.get(seg[0])
+        p2  = self.base_positions.get(seg[1])
+
+        if p1 and p2:
+            t    = pulse["t"]
+            half = 0.12   # longer pulse = more visible
+            t0   = max(0.0, t - half)
+            t1   = min(1.0, t + half)
+            x0 = p1[0] + (p2[0] - p1[0]) * t0
+            y0 = p1[1] + (p2[1] - p1[1]) * t0
+            x1 = p1[0] + (p2[0] - p1[0]) * t1
+            y1 = p1[1] + (p2[1] - p1[1]) * t1
+
+            # Brightness fades toward end of each pass
+            pass_progress = pulse["seg_idx"] / max(1, len(pulse["segments"]))
+            alpha = 1.0 - pass_progress * 0.3   # slight dim toward end
+            line_color = blend_colors(pulse["color"], "#ffffff", 0.4 * alpha)
+
+            if pulse["cid"]:
+                try:
+                    self.canvas.delete(pulse["cid"])
+                except Exception:
+                    pass
+            pulse["cid"] = self.canvas.create_line(
+                x0, y0, x1, y1,
+                fill=line_color, width=5,
+                tags="path_pulse"
+            )
+
+        pulse["after_id"] = self.root.after(1000 // fps, lambda: self._pulse_tick(pulse))
+
     def clear_all_runners(self):
-        """Clears all runner icons from the canvas."""
-        # Must be called on the main thread
+        """Clears all runner icons and base path pulses from the canvas."""
         if threading.current_thread() != threading.main_thread():
              self.root.after(0, self.clear_all_runners)
              return
@@ -909,7 +1183,22 @@ class ScoreboardApp:
                 pass
         self.runners.clear()
         self.runners_by_base.clear()
-        self.log("All runners cleared", verbose=True, cat="UI")
+
+        # Cancel and remove all active path pulses
+        for pulse in list(self._path_pulses):
+            if pulse.get("after_id"):
+                try:
+                    self.root.after_cancel(pulse["after_id"])
+                except Exception:
+                    pass
+            if pulse.get("cid"):
+                try:
+                    self.canvas.delete(pulse["cid"])
+                except Exception:
+                    pass
+        self._path_pulses.clear()
+        self.canvas.delete("path_pulse")
+        self.log("All runners and path pulses cleared", verbose=True, cat="UI")
 
     def render_full_gui(self):
         """Wrapper to ensure full render is called on the main thread."""
@@ -944,11 +1233,15 @@ class ScoreboardApp:
         if full:
             self.canvas.delete("all")
             self._marquee_canvas_id = None
+            self._feed_unchanged = False
         else:
-            # Clear dynamic groups for redraw
+            # Only the status bar needs updating every second (countdown timer).
+            # Diamond/BSO are left untouched during a fetch — _skip_dynamic handles this below.
             self.canvas.delete("status_bar")
-            self.canvas.delete("bso_group")
-            self.canvas.delete("diamond_bases")
+
+        # Skip dynamic (diamond + BSO) redraw during partial renders while fetching,
+        # or when the last poll returned unchanged data (nothing to redraw).
+        _skip_dynamic = not full and (self.running_fetch or self._feed_unchanged)
 
         game_src = None
         linescore = {}
@@ -973,24 +1266,26 @@ class ScoreboardApp:
                 self.canvas.create_text(self.width // 2, mid_y - 20,
                                         text="RECENT RESULTS", font=self.font_header,
                                         fill=self.accent)
-                strip_w = 100
-                total_w = len(self.recent_results) * strip_w
+                strip_w  = max(70, int(self.width * 0.09))
+                pill_hw  = max(20, strip_w // 2 - 8)   # half-width of pill
+                pill_hh  = max(16, int(self.height * 0.038))  # half-height of pill
+                total_w  = len(self.recent_results) * strip_w
                 strip_x0 = self.width // 2 - total_w // 2
                 for idx, res in enumerate(self.recent_results):
                     sx = strip_x0 + idx * strip_w + strip_w // 2
                     sy = mid_y + 20
-                    wl = res.get("wl", "?")
+                    wl    = res.get("wl", "?")
                     score = res.get("score", "-")
-                    opp = res.get("opp", "")[:10]
+                    opp   = res.get("opp", "")[:10]
                     pill_col = "#00e676" if wl == "W" else "#e74c3c"
-                    # Pill background
-                    self.canvas.create_rectangle(sx - 42, sy - 26, sx + 42, sy + 26,
+                    self.canvas.create_rectangle(sx - pill_hw, sy - pill_hh,
+                                                 sx + pill_hw, sy + pill_hh,
                                                  fill=pill_col, outline="white", width=1)
-                    self.canvas.create_text(sx, sy - 10, text=wl,
+                    self.canvas.create_text(sx, sy - pill_hh // 2, text=wl,
                                             font=self.font_status, fill="#ffffff")
-                    self.canvas.create_text(sx, sy + 6, text=score,
+                    self.canvas.create_text(sx, sy + 2, text=score,
                                             font=self.font_sb_label, fill="#ffffff")
-                    self.canvas.create_text(sx, sy + 18, text=f"vs {opp}",
+                    self.canvas.create_text(sx, sy + pill_hh // 2 + 2, text=f"vs {opp}",
                                             font=self.font_sb_label, fill="#dddddd")
 
             self.canvas.delete("status_bar")
@@ -1008,12 +1303,13 @@ class ScoreboardApp:
         innings = linescore.get("innings", []) if linescore else []
         max_innings = max(len(innings), UI_CFG.get("max_innings", 9))
 
-        left_margin = self.left_margin
-        top_margin = self.top_margin
-        team_x = left_margin
+        left_margin   = self.left_margin
+        top_margin    = self.top_margin
+        team_x        = left_margin
         score_start_x = self.score_start_x
-        col_width = self.col_width
-        row_height = self.row_height
+        col_width     = self.col_width
+        row_height    = self.row_height
+        hh            = self.header_half   # half-height of all cells
 
         y_away = top_margin + row_height
         y_home = y_away + row_height
@@ -1026,50 +1322,29 @@ class ScoreboardApp:
                                         fill="#000000", stipple="gray12",
                                         width=1, tags="scanline")
 
-            # Title
             title_text = f"{self.followed_team_name} — MLB Scoreboard"
-            self.canvas.create_text(self.width // 2, 22, text=title_text, font=self.font_title, fill=self.accent)
+            title_y = max(16, int(self.height * 0.032))
+            self.canvas.create_text(self.width // 2, title_y, text=title_text, font=self.font_title, fill=self.accent)
 
-            # Large live score display (top-right area, only when live)
-            is_live_score = False
-            if self.live_feed:
-                st = (self.live_feed.get("gameData", {}).get("status", {}).get("detailedState", "")) or ""
-                is_live_score = "In Progress" in st or "Live" in st
-            if is_live_score:
-                ls_t = self.live_feed.get("liveData", {}).get("linescore", {}).get("teams", {}) or {}
-                a_runs = ls_t.get("away", {}).get("runs", 0)
-                h_runs = ls_t.get("home", {}).get("runs", 0)
-                score_big_x = self.width - 140
-                score_big_y = 80
-                away_col_s = team_color_for(away)[1] or self.fg
-                home_col_s = team_color_for(home)[1] or self.fg
-                self.canvas.create_text(score_big_x, score_big_y,
-                                        text=f"{a_runs}", font=self.font_score_big,
-                                        fill=away_col_s, anchor="e")
-                self.canvas.create_text(score_big_x + 10, score_big_y,
-                                        text="–", font=self.font_score_big,
-                                        fill=self.fg, anchor="w")
-                self.canvas.create_text(score_big_x + 52, score_big_y,
-                                        text=f"{h_runs}", font=self.font_score_big,
-                                        fill=home_col_s, anchor="e")
-                # Away / Home labels under score
-                self.canvas.create_text(score_big_x - 20, score_big_y + 26,
-                                        text=away[:3].upper(), font=self.font_sb_label,
-                                        fill=away_col_s, anchor="center")
-                self.canvas.create_text(score_big_x + 36, score_big_y + 26,
-                                        text=home[:3].upper(), font=self.font_sb_label,
-                                        fill=home_col_s, anchor="center")
+            # Fullscreen toggle button (top-right corner)
+            btn_x = self.width - 8
+            btn_y = title_y
+            fs_label = "⛶ EXIT FULL" if self._is_fullscreen else "⛶ FULL"
+            self.canvas.create_text(btn_x, btn_y, text=fs_label,
+                                    font=self.font_sb_label, fill=self.accent,
+                                    anchor="ne", tags="fs_btn")
+            self.canvas.tag_bind("fs_btn", "<Button-1>", self._toggle_fullscreen)
 
             # header team cell
-            self.canvas.create_rectangle(team_x - 8, top_margin - 18, score_start_x - 4, top_margin + 18,
+            self.canvas.create_rectangle(team_x - 8, top_margin - hh, score_start_x - 4, top_margin + hh,
                                          fill=self.bg, outline="black")
             self.canvas.create_text(team_x, top_margin, text="TEAM", font=self.font_header, fill=self.accent, anchor="w")
 
             # inning header cells
             for i in range(max_innings):
                 x_center = score_start_x + i * col_width
-                self.canvas.create_rectangle(x_center - col_width // 2, top_margin - 18,
-                                             x_center + col_width // 2, top_margin + 18,
+                self.canvas.create_rectangle(x_center - col_width // 2, top_margin - hh,
+                                             x_center + col_width // 2, top_margin + hh,
                                              fill=self.bg, outline="black", tags="inning_header")
                 self.canvas.create_text(x_center, top_margin, text=str(i + 1), font=self.font_header, fill=self.accent, tags="inning_header_text")
 
@@ -1081,8 +1356,8 @@ class ScoreboardApp:
             totals_labels = ("R", "H", "E", "⚾")
             for j, label in enumerate(totals_labels):
                 x_center = score_start_x + (max_innings + j) * col_width
-                self.canvas.create_rectangle(x_center - col_width // 2, top_margin - 18,
-                                             x_center + col_width // 2, top_margin + 18,
+                self.canvas.create_rectangle(x_center - col_width // 2, top_margin - hh,
+                                             x_center + col_width // 2, top_margin + hh,
                                              fill=self.bg, outline="black")
                 if label == "⚾":
                     display = "🏆" if is_final_hdr else "🦇"
@@ -1092,7 +1367,7 @@ class ScoreboardApp:
 
             # --- Clean, properly aligned grid overlay ---
             grid_left = team_x - 8
-            grid_top = top_margin - 18
+            grid_top = top_margin - hh
             grid_right = score_start_x + (max_innings + 3) * col_width + col_width // 2
             grid_bottom = grid_top + row_height * 3  # header + away + home full enclosure
 
@@ -1106,13 +1381,12 @@ class ScoreboardApp:
 
             self.canvas.create_rectangle(grid_left, grid_top, grid_right, grid_bottom, outline="#55606b", width=2)
             
-            # Diamond and bases (Static parts)
-            self.diamond_cx = self.left_margin + 180
-            self.diamond_cy = y_home + row_height + 140
-            self.diamond_ds = 120
+            # Diamond (static polygon) — geometry already set by _compute_layout()
             ds = self.diamond_ds
-            diamond_pts = [self.diamond_cx, self.diamond_cy - ds, self.diamond_cx + ds, self.diamond_cy,
-                           self.diamond_cx, self.diamond_cy + ds, self.diamond_cx - ds, self.diamond_cy]
+            diamond_pts = [self.diamond_cx, self.diamond_cy - ds,
+                           self.diamond_cx + ds, self.diamond_cy,
+                           self.diamond_cx, self.diamond_cy + ds,
+                           self.diamond_cx - ds, self.diamond_cy]
             self.canvas.create_polygon(diamond_pts, outline=self.accent, fill="#6b8f57", width=3)
         
         # Draw team rows (colored) and per-inning values
@@ -1122,7 +1396,7 @@ class ScoreboardApp:
 
             # Redraw only the dynamic cells for non-full renders
             if full:
-                self.canvas.create_rectangle(team_x - 8, y - 18, score_start_x - 4, y + 18,
+                self.canvas.create_rectangle(team_x - 8, y - hh, score_start_x - 4, y + hh,
                                              fill=bg_col, outline="black", width=1)
                 self.canvas.create_text(team_x, y, text=name, font=self.font_team, fill=fg_col, anchor="w")
 
@@ -1143,7 +1417,7 @@ class ScoreboardApp:
                     bg_fill_header = blend_colors(self.accent, "#000000", 0.55)
                     text_fill_header = "#ffffff"
                     if full:
-                        self.canvas.create_rectangle(x1, top_margin - 18, x2, top_margin + 18,
+                        self.canvas.create_rectangle(x1, top_margin - hh, x2, top_margin + hh,
                                                      fill=bg_fill_header, outline="black", tags="inning_header")
                         self.canvas.create_text(score_start_x + i * col_width, top_margin, text=str(i + 1),
                                                 font=self.font_header, fill=text_fill_header, tags="inning_header_text")
@@ -1166,7 +1440,7 @@ class ScoreboardApp:
 
                 score_tag = f"score_{side}_{i}"
                 self.canvas.delete(score_tag)
-                self.canvas.create_rectangle(x1, y - 18, x2, y + 18, fill=cell_bg, outline="black", tags=score_tag)
+                self.canvas.create_rectangle(x1, y - hh, x2, y + hh, fill=cell_bg, outline="black", tags=score_tag)
                 self.canvas.create_text(score_start_x + i * col_width, y, text=str(run_val), font=self.font_team,
                                         fill=fg_col, tags=score_tag)
 
@@ -1182,7 +1456,7 @@ class ScoreboardApp:
 
                 total_tag = f"total_{side}_{j}"
                 self.canvas.delete(total_tag)
-                self.canvas.create_rectangle(x_center - col_width // 2, y - 18, x_center + col_width // 2, y + 18,
+                self.canvas.create_rectangle(x_center - col_width // 2, y - hh, x_center + col_width // 2, y + hh,
                                              fill=bg_col, outline="black", tags=total_tag)
                 self.canvas.create_text(x_center, y, text=val, font=self.font_team, fill=fg_col, tags=total_tag)
 
@@ -1190,7 +1464,7 @@ class ScoreboardApp:
             x_icon = score_start_x + (max_innings + 3) * col_width
             icon_tag = f"icon_{side}"
             self.canvas.delete(icon_tag)
-            self.canvas.create_rectangle(x_icon - col_width // 2, y - 18, x_icon + col_width // 2, y + 18,
+            self.canvas.create_rectangle(x_icon - col_width // 2, y - hh, x_icon + col_width // 2, y + hh,
                                          fill=bg_col, outline="black", tags=icon_tag)
             # Show W/L if game is final
             if self.live_feed:
@@ -1223,28 +1497,27 @@ class ScoreboardApp:
                     if int(away_runs) == 0 and int(home_runs) == 0:
                         clean_inning = True
 
-        # Diamond bases (dynamic part)
-        # Guard: diamond geometry is only set during a full render; skip diamond
-        # draw but still render the status bar so it's always visible.
-        if self.diamond_ds is None or self.diamond_cx is None or self.diamond_cy is None:
+        # Diamond + BSO: skip entirely during partial renders while a fetch is running.
+        # The elements stay on canvas from the previous render — no flicker.
+        # render_full_gui() redraws everything once the fetch completes.
+        if _skip_dynamic:
             self.canvas.delete("status_bar")
             self.render_status_bar(away, home)
             return
+
+        # Diamond bases (dynamic part)
         self.canvas.delete("diamond_bases")
         inset = self.diamond_ds * 0.6
-        self.base_positions = {"2B": (self.diamond_cx, self.diamond_cy - inset),
-                              "1B": (self.diamond_cx + inset, self.diamond_cy),
-                              "3B": (self.diamond_cx - inset, self.diamond_cy),
-                              "Home": (self.diamond_cx, self.diamond_cy + inset)}
-        base_half = 18
+        base_half = self.base_half
 
         # Fix #12: draw a soft glow ring around the diamond for a clean inning
         if clean_inning:
             ds = self.diamond_ds
-            glow_pts = [self.diamond_cx, self.diamond_cy - ds - 10,
-                        self.diamond_cx + ds + 10, self.diamond_cy,
-                        self.diamond_cx, self.diamond_cy + ds + 10,
-                        self.diamond_cx - ds - 10, self.diamond_cy]
+            glow_off = max(6, int(ds * 0.09))
+            glow_pts = [self.diamond_cx, self.diamond_cy - ds - glow_off,
+                        self.diamond_cx + ds + glow_off, self.diamond_cy,
+                        self.diamond_cx, self.diamond_cy + ds + glow_off,
+                        self.diamond_cx - ds - glow_off, self.diamond_cy]
             self.canvas.create_polygon(glow_pts, outline="#00e676", fill="", width=3, tags="diamond_bases")
 
         for bname, (bx, by) in self.base_positions.items():
@@ -1325,25 +1598,35 @@ class ScoreboardApp:
 
             self.canvas.create_text(x_icon, y_icon, text=icon, font=self.font_team, fill=self.accent, tags=icon_tag)
 
-        # B/S/O indicator panel — right of diamond
+        # B/S/O indicator panel — skip during active fetch to prevent flicker
         self.canvas.delete("bso_group")
 
-        bso_x = self.diamond_cx + self.diamond_ds + 120
-        balls = self.balls
-        strikes = self.strikes
-        outs = self.outs
-
-        sz = 10        # half-size of each indicator shape
-        spacing = 30
+        bso_x    = self.bso_zone_left + max(48, int(self.bso_spacing * 3.0))
+        spacing  = self.bso_spacing
+        sz       = self.bso_sz
+        balls    = self.balls
+        strikes  = self.strikes
+        outs     = self.outs
         top_of_bso = self.diamond_cy - spacing
 
+        ind_gap  = max(4, sz // 2)
+        lbl_w    = self.font_small.measure("STRIKES")  # fixed label column width
+
+        # Fixed name column x — start after the widest possible indicator group (3 indicators)
+        max_ind_w = 3 * (sz * 2) + 2 * ind_gap
+        name_x    = bso_x + lbl_w + spacing + max_ind_w + spacing * 3
+
+        # Right edge for name text — leave a small margin
+        name_x_end = self.width - max(8, int(spacing * 0.4))
+
         # Colours
-        col_active_ball    = "#f1c40f"   # yellow
-        col_active_strike  = "#e67e22"   # orange
-        col_active_out     = "#e74c3c"   # red
-        col_danger_ball    = "#e74c3c"   # red on 3 balls
-        col_danger_strike  = "#e74c3c"   # red on 2 strikes
-        col_inactive       = "#2c3e50"   # dark slate
+        col_active_ball   = "#f1c40f"
+        col_active_strike = "#e67e22"
+        col_active_out    = "#e74c3c"
+        col_danger_ball   = "#e74c3c"
+        col_danger_strike = "#e74c3c"
+        col_inactive      = "#2c3e50"
+        col_name_dim      = "#aabbcc"
 
         def draw_square(cx, cy, half, fill, tag):
             self.canvas.create_rectangle(cx - half, cy - half, cx + half, cy + half,
@@ -1357,50 +1640,44 @@ class ScoreboardApp:
             self.canvas.create_rectangle(cx - half, cy - half, cx + half, cy + half,
                                          fill=fill, outline="#ff6b6b", width=2, tags=tag)
 
-        # BALLS — diamond shapes (3 possible)
-        self.canvas.create_text(bso_x, top_of_bso - spacing, text="BALLS",
-                                font=self.font_small, fill=self.fg, anchor="w", tags="bso_group")
-        for i in range(3):
-            cx_s = bso_x + 72 + i * (sz * 2 + 8)
-            cy_s = top_of_bso - spacing
-            if balls is not None and i < balls:
-                fill_c = col_danger_ball if balls == 3 else col_active_ball
-            else:
-                fill_c = col_inactive
-            draw_diamond_shape(cx_s, cy_s, sz, fill_c, "bso_group")
+        def bso_row(label, cy, n_ind, draw_fn, count, danger_n, col_act, col_dng, name_text="", name_prefix=""):
+            # Label
+            self.canvas.create_text(bso_x, cy, text=label,
+                                    font=self.font_small, fill=self.fg,
+                                    anchor="w", tags="bso_group")
+            # Indicators
+            ind_start = bso_x + lbl_w + spacing
+            for i in range(n_ind):
+                cx_i = ind_start + sz + i * (sz * 2 + ind_gap)
+                fill_c = (col_dng if count == danger_n else col_act) \
+                         if (count is not None and i < count) else col_inactive
+                draw_fn(cx_i, cy, sz, fill_c, "bso_group")
+            # Name — fixed left-aligned column, same x for all rows
+            if name_text:
+                full_text = f"{name_prefix}{name_text}" if name_prefix else name_text
+                avail_px  = name_x_end - name_x
+                display   = full_text
+                while display and self.font_small.measure(display) > avail_px:
+                    display = display[:-1]
+                self.canvas.create_text(name_x, cy, text=display,
+                                        font=self.font_small, fill=col_name_dim,
+                                        anchor="w", tags="bso_group")
 
-        # STRIKES — filled squares (2 possible)
-        self.canvas.create_text(bso_x, top_of_bso + spacing, text="STRIKES",
-                                font=self.font_small, fill=self.fg, anchor="w", tags="bso_group")
-        for i in range(2):
-            cx_s = bso_x + 72 + i * (sz * 2 + 8)
-            cy_s = top_of_bso + spacing
-            if strikes is not None and i < strikes:
-                fill_c = col_danger_strike if strikes == 2 else col_active_strike
-            else:
-                fill_c = col_inactive
-            draw_square(cx_s, cy_s, sz, fill_c, "bso_group")
+        # Strip "Pitcher: " / "Batter: " prefixes — supply them as the prefix arg
+        def strip_prefix(text, prefix):
+            return text[len(prefix):].strip() if text.startswith(prefix) else text
 
-        # OUTS — red squares with bright outline (2 shown max)
-        self.canvas.create_text(bso_x, top_of_bso + spacing * 3, text="OUTS",
-                                font=self.font_small, fill=self.fg, anchor="w", tags="bso_group")
-        for i in range(2):
-            cx_s = bso_x + 72 + i * (sz * 2 + 8)
-            cy_s = top_of_bso + spacing * 3
-            if outs is not None and i < outs:
-                fill_c = col_active_out
-            else:
-                fill_c = col_inactive
-            draw_out_square(cx_s, cy_s, sz, fill_c, "bso_group")
+        pitcher_name = strip_prefix(self.current_pitcher, "Pitcher: ")
+        batter_name  = strip_prefix(self.current_batter,  "Batter: ")
 
-        # Player/Pitcher names — Fix #14: truncate long names to avoid overflow
-        pb_x = bso_x
-        pb_y = top_of_bso + spacing * 5
-        max_name_chars = 28
-        pitcher_text = self.current_pitcher[:max_name_chars] + "…" if len(self.current_pitcher) > max_name_chars else self.current_pitcher
-        batter_text = self.current_batter[:max_name_chars] + "…" if len(self.current_batter) > max_name_chars else self.current_batter
-        self.canvas.create_text(pb_x, pb_y, text=pitcher_text, font=self.font_small, fill=self.fg, anchor="w", tags="bso_group")
-        self.canvas.create_text(pb_x, pb_y + 18, text=batter_text, font=self.font_small, fill=self.fg, anchor="w", tags="bso_group")
+        bso_row("BALLS",   top_of_bso - spacing, 3, draw_diamond_shape,
+                balls,   3, col_active_ball,   col_danger_ball,
+                pitcher_name, "P: ")
+        bso_row("STRIKES", top_of_bso + spacing, 2, draw_square,
+                strikes, 2, col_active_strike, col_danger_strike,
+                batter_name, "B: ")
+        bso_row("OUTS",    top_of_bso + spacing * 3, 2, draw_out_square,
+                outs,    3, col_active_out,    col_active_out)
 
         # Status bar (replaces old footer)
         self.canvas.delete("status_bar")
@@ -1423,17 +1700,19 @@ class ScoreboardApp:
                          .get("status", {}).get("detailedState", "")) or ""
             is_live = "In Progress" in state_str or "Live" in state_str
 
-        # Always 3 rows: marquee | game state | at-bat / next-game
+        # Always 4 rows: marquee | game state | at-bat stats | event ticker
         sbh   = self.STATUS_BAR_H_LIVE
-        row_h = sbh // 3
+        row_h = sbh // 4
         bar_top = self.height - sbh
         bar_bot = self.height
 
         row1_cy = bar_top + row_h // 2              # marquee row
         row2_cy = bar_top + row_h + row_h // 2      # game state row
-        row3_cy = bar_top + row_h * 2 + row_h // 2  # at-bat / next-game row
+        row3_cy = bar_top + row_h * 2 + row_h // 2  # at-bat stats row
+        row4_cy = bar_top + row_h * 3 + row_h // 2  # event ticker row
         sep1    = bar_top + row_h
         sep2    = bar_top + row_h * 2
+        sep3    = bar_top + row_h * 3
 
         # ── Background gradient ───────────────────────────────────────────────
         away_col = team_color_for(away_name)[0]
@@ -1459,30 +1738,34 @@ class ScoreboardApp:
                                 fill="#ffffff", width=1, tags=tag, stipple="gray25")
         self.canvas.create_line(0, sep2, self.width, sep2,
                                 fill="#ffffff", width=1, tags=tag, stipple="gray25")
+        self.canvas.create_line(0, sep3, self.width, sep3,
+                                fill="#ffffff", width=1, tags=tag, stipple="gray25")
 
         # ── Marquee row — always active ───────────────────────────────────────
         # Start or refresh the scroller
         if not self._marquee_active:
             self.root.after(0, self._marquee_start)
         else:
-            # Rebuild string each render (live/not-live or batter/pitcher may change)
-            text, b_span, p_span = self._build_marquee_string()
+            # Rebuild string each render (live/not-live or roster may change)
+            text = self._build_marquee_string()
             if text != self._marquee_text:
-                self._marquee_text         = text
-                self._marquee_text_w       = self.font_marquee.measure(text)
-                self._marquee_batter_span  = b_span
-                self._marquee_pitcher_span = p_span
+                self._marquee_text   = text
+                self._marquee_text_w = self.font_marquee.measure(text)
 
-        # Reassign row centres for stat rows (same in all cases now)
+        # Row centres for stat rows
         game_row_cy  = row2_cy
         atbat_row_cy = row3_cy
+        event_row_cy = row4_cy
 
-        # Helper: draw a labelled stat segment
+        # Helper: draw a labelled stat segment — offsets scale with row height
+        lbl_off = max(4, row_h // 5)
+        val_off = max(5, row_h // 4)
+
         def stat_cell(cx, cy, label, value, value_fill="#ffffff"):
-            self.canvas.create_text(cx, cy - 6, text=label.upper(),
+            self.canvas.create_text(cx, cy - lbl_off, text=label.upper(),
                                     font=self.font_sb_label, fill="#cccccc",
                                     anchor="center", tags=tag)
-            self.canvas.create_text(cx, cy + 7, text=str(value),
+            self.canvas.create_text(cx, cy + val_off, text=str(value),
                                     font=self.font_sb_value, fill=value_fill,
                                     anchor="center", tags=tag)
 
@@ -1501,7 +1784,7 @@ class ScoreboardApp:
             pill_text = "◌ WAITING"
             pill_fill = "#7f8c8d"
 
-        pill_x = 60
+        pill_x = max(44, int(self.width * 0.055))
         self.canvas.create_text(pill_x, game_row_cy, text=pill_text,
                                 font=self.font_sb_value, fill=pill_fill,
                                 anchor="center", tags=tag)
@@ -1516,7 +1799,7 @@ class ScoreboardApp:
                 arrow = "▲" if str(half).lower() == "top" else "▼"
                 inning_str = f"{arrow} {inn}"
         if inning_str:
-            stat_cell(180, game_row_cy, "inning", inning_str)
+            stat_cell(max(120, int(self.width * 0.165)), game_row_cy, "inning", inning_str)
 
         # Weather (centre of game state row)
         if self.sb_weather:
@@ -1542,12 +1825,12 @@ class ScoreboardApp:
         pill_fg = "#000000"
         api_pill_x = self.width - 8
         pill_w = self.font_sb_value.measure(poll_status_text)
-        pill_h = 16
+        pill_h = self.font_sb_value.metrics("linespace")
         pill_cx = api_pill_x - pill_w // 2 - 2
-        self.canvas.create_text(pill_cx, game_row_cy - 6, text="API STATUS",
+        self.canvas.create_text(pill_cx, game_row_cy - lbl_off, text="API STATUS",
                                 font=self.font_sb_label, fill="#cccccc",
                                 anchor="center", tags=tag)
-        pill_cy = game_row_cy + 7
+        pill_cy = game_row_cy + val_off
         self.canvas.create_rectangle(api_pill_x - pill_w - 4, pill_cy - pill_h // 2,
                                      api_pill_x + 4, pill_cy + pill_h // 2,
                                      fill=poll_bg_color, outline="", tags=tag)
@@ -1557,11 +1840,11 @@ class ScoreboardApp:
 
         # Next poll countdown
         time_display = self.format_seconds_to_dhms_string(self.next_update_in)
-        stat_cell(self.width - 120, game_row_cy, "next poll", time_display)
+        stat_cell(self.width - max(80, int(self.width * 0.11)), game_row_cy, "next poll", time_display)
 
         # Error indicator
         if self._fetch_error:
-            self.canvas.create_text(self.width - 240, game_row_cy,
+            self.canvas.create_text(self.width - max(160, int(self.width * 0.22)), game_row_cy,
                                     text=f"⚠ {self._fetch_error_msg}",
                                     font=self.font_sb_label, fill="#e67e22",
                                     anchor="center", tags=tag)
@@ -1593,56 +1876,71 @@ class ScoreboardApp:
             pitch_str = self.sb_last_pitch_type
         else:
             pitch_str = "—"
-        stat_cell(130, atbat_row_cy, "last pitch", pitch_str)
+        stat_cell(max(90, int(self.width * 0.12)), atbat_row_cy, "last pitch", pitch_str)
 
-        # Win probability bar
-        wp_cx = self.width // 2
-        wp_w = 220
-        wp_h = 10
-        wp_x0 = wp_cx - wp_w // 2
-        wp_x1 = wp_cx + wp_w // 2
-        wp_y0 = atbat_row_cy - wp_h // 2
-        wp_y1 = atbat_row_cy + wp_h // 2
+        # Team records — centred, away on left, home on right
+        rec_cx  = self.width // 2
+        rec_off = max(80, int(self.width * 0.11))
+        away_rec = self.sb_away_record or "—"
+        home_rec = self.sb_home_record or "—"
+        away_rec_col = team_color_for(away_name)[1] or "#ffffff"
+        home_rec_col = team_color_for(home_name)[1] or "#ffffff"
+        # Last word of team name as nickname label (e.g. "Astros", "Mets")
+        def nickname(name):
+            return name.split()[-1] if name else "???"
 
-        if self.sb_win_prob_home_display is not None:
-            home_prob = max(0.0, min(100.0, float(self.sb_win_prob_home_display)))
-            away_prob = 100.0 - home_prob
-            self.canvas.create_rectangle(wp_x0, wp_y0, wp_x1, wp_y1,
-                                         fill="#2c3e50", outline="#555", tags=tag)
-            away_end = wp_x0 + int(wp_w * away_prob / 100)
-            away_bar_col = team_color_for(away_name)[1] or "#3498db"
-            if away_end > wp_x0:
-                self.canvas.create_rectangle(wp_x0, wp_y0, away_end, wp_y1,
-                                             fill=away_bar_col, outline="", tags=tag)
-            home_start = wp_x0 + int(wp_w * away_prob / 100)
-            home_bar_col = team_color_for(home_name)[1] or "#e74c3c"
-            if home_start < wp_x1:
-                self.canvas.create_rectangle(home_start, wp_y0, wp_x1, wp_y1,
-                                             fill=home_bar_col, outline="", tags=tag)
-            self.canvas.create_text(wp_x0, atbat_row_cy - 12,
-                                    text=f"{away_name[:12]}  {away_prob:.0f}%",
-                                    font=self.font_sb_label, fill="#cccccc",
-                                    anchor="w", tags=tag)
-            self.canvas.create_text(wp_x1, atbat_row_cy - 12,
-                                    text=f"{home_prob:.0f}%  {home_name[:12]}",
-                                    font=self.font_sb_label, fill="#cccccc",
-                                    anchor="e", tags=tag)
-        else:
-            self.canvas.create_text(wp_cx, atbat_row_cy,
-                                    text="Win Probability: —",
-                                    font=self.font_sb_label, fill="#888888",
-                                    anchor="center", tags=tag)
+        stat_cell(rec_cx - rec_off, atbat_row_cy, nickname(away_name), away_rec, value_fill=away_rec_col)
+        stat_cell(rec_cx + rec_off, atbat_row_cy, nickname(home_name), home_rec, value_fill=home_rec_col)
 
         # Batter AVG / OBP
         avg_str = self.sb_batter_avg if self.sb_batter_avg else ".---"
         obp_str = self.sb_batter_obp if self.sb_batter_obp else ".---"
-        stat_cell(self.width - 220, atbat_row_cy, "AVG / OBP", f"{avg_str}  /  {obp_str}")
+        stat_cell(self.width - max(150, int(self.width * 0.20)), atbat_row_cy, "AVG / OBP", f"{avg_str}  /  {obp_str}")
 
         # Pitcher pitch count
         pc_str = str(self.sb_pitch_count) if self.sb_pitch_count is not None else "—"
-        stat_cell(self.width - 80, atbat_row_cy, "pitches", pc_str)
+        stat_cell(self.width - max(55, int(self.width * 0.073)), atbat_row_cy, "pitches", pc_str)
 
-    def start_fade(self, base_key, team_color, duration_ms=600, steps=8):
+        # ── Row 4: event ticker ────────────────────────────────────────────────
+        # Show transient status (challenge, delay, etc.) for 8s, then last play description
+        EVENT_TTL = 8.0
+        elapsed_event = time.time() - self.sb_event_msg_set_at
+        # Last play expires after 2 poll cycles, capped at 60s
+        play_ttl = min(2 * self.poll_interval, 60)
+        play_fresh = self.sb_last_play and (time.time() - self.sb_last_play_set_at) < play_ttl
+        ind_x = max(12, int(self.width * 0.016))
+        msg_x = ind_x + max(10, int(self.width * 0.022))
+        if self.sb_event_msg and elapsed_event < EVENT_TTL:
+            pulse_on = int(elapsed_event * 2) % 2 == 0
+            indicator_fill = "#f39c12" if pulse_on else "#c0820a"
+            self.canvas.create_text(ind_x, event_row_cy, text="▶",
+                                    font=self.font_sb_value, fill=indicator_fill,
+                                    anchor="center", tags=tag)
+            # Truncate by measuring until it fits
+            avail = self.width - msg_x - 8
+            msg = self.sb_event_msg
+            while msg and self.font_sb_value.measure(msg) > avail:
+                msg = msg[:-1]
+            self.canvas.create_text(msg_x, event_row_cy, text=msg,
+                                    font=self.font_sb_value, fill="#f39c12",
+                                    anchor="w", tags=tag)
+        elif play_fresh:
+            avail = self.width - 16
+            desc = self.sb_last_play
+            while desc and self.font_sb_value.measure(desc) > avail:
+                desc = desc[:-1]
+            if len(desc) < len(self.sb_last_play):
+                desc = desc[:-1] + "…"
+            self.canvas.create_text(self.width // 2, event_row_cy, text=desc,
+                                    font=self.font_sb_value, fill="#ffffff",
+                                    anchor="center", tags=tag)
+        else:
+            self.canvas.create_text(self.width // 2, event_row_cy,
+                                    text="Awaiting play data…",
+                                    font=self.font_sb_label, fill="#888888",
+                                    anchor="center", tags=tag)
+
+    def start_fade(self, base_key, team_color, duration_ms=1200, steps=16):
         """Starts a base fade animation (Must be called on main thread)."""
         if threading.current_thread() != threading.main_thread():
              self.root.after(0, lambda: self.start_fade(base_key, team_color, duration_ms, steps))
@@ -1798,12 +2096,25 @@ class ScoreboardApp:
                         self._fetch_error_msg = ""
                     # ── Key event: game status change ─────────────────────────
                     new_status = (feed.get("gameData", {}).get("status", {}).get("detailedState", "")) or ""
+                    # Transient states — log them but don't update _last_game_status
+                    # so the transition back to "In Progress" isn't treated as a new change
+                    _TRANSIENT_STATES = {
+                        "manager challenge", "player challenge",
+                        "review", "instant replay", "delayed",
+                    }
+                    is_transient = any(t in new_status.lower() for t in _TRANSIENT_STATES)
+
                     if new_status and new_status != self._last_game_status:
                         gd_t = feed.get("gameData", {}).get("teams", {}) or {}
                         away_t = gd_t.get("away", {}).get("name", "Away")
                         home_t = gd_t.get("home", {}).get("name", "Home")
                         self.log(f"Game status: {self._last_game_status or '—'} → {new_status}  ({away_t} @ {home_t})", level="info", cat="GAME")
-                        self._last_game_status = new_status
+                        if is_transient:
+                            with _STATE_LOCK:
+                                self.sb_event_msg = new_status
+                                self.sb_event_msg_set_at = time.time()
+                        else:
+                            self._last_game_status = new_status
                 self.live_feed = feed
                 # Fix #4: only invoke each recorder when its path is actually configured
                 if RECORD_FULL_PATH:
@@ -1867,7 +2178,8 @@ class ScoreboardApp:
                 # --- Status bar stat extraction ---
                 new_pitch_speed = None
                 new_pitch_type = None
-                new_win_prob_home = None
+                new_away_record = None
+                new_home_record = None
                 new_batter_avg = None
                 new_batter_obp = None
                 new_pitch_count = None
@@ -1886,10 +2198,21 @@ class ScoreboardApp:
                                 new_pitch_type = typ
                             break
 
-                    # Win probability — last entry in the list is most current
-                    wp_list = current_play.get("winProbability") or []
-                    if wp_list:
-                        new_win_prob_home = wp_list[-1].get("homeTeamWinProbability")
+                    # Last play description
+                    new_last_play = (current_play.get("result") or {}).get("description") or None
+
+                    # Team records from gameData
+                    gd_rec = self.live_feed.get("gameData", {}).get("teams", {}) or {}
+                    for side, attr in (("away", "new_away_record"), ("home", "new_home_record")):
+                        rec = gd_rec.get(side, {}).get("record", {}) or {}
+                        w = rec.get("wins")
+                        l = rec.get("losses")
+                        if w is not None and l is not None:
+                            val = f"{w}W · {l}L"
+                            if side == "away":
+                                new_away_record = val
+                            else:
+                                new_home_record = val
 
                     # Batter season stats from boxscore players map
                     batter_name = (matchup.get("batter") or {}).get("fullName")
@@ -1991,12 +2314,11 @@ class ScoreboardApp:
                     self.sb_last_pitch_speed = new_pitch_speed
                     self.sb_last_pitch_type = new_pitch_type
                     # Smooth win probability
-                    if new_win_prob_home is not None:
-                        self.sb_win_prob_home = new_win_prob_home
-                        if self.sb_win_prob_home_display is None:
-                            self.sb_win_prob_home_display = float(new_win_prob_home)
-                        else:
-                            self.sb_win_prob_home_display += (float(new_win_prob_home) - self.sb_win_prob_home_display) * 0.2
+                    self.sb_away_record = new_away_record
+                    self.sb_home_record = new_home_record
+                    if new_last_play:
+                        self.sb_last_play = new_last_play
+                        self.sb_last_play_set_at = time.time()
                     self.sb_batter_avg = new_batter_avg
                     self.sb_batter_obp = new_batter_obp
                     self.sb_pitch_count = new_pitch_count
@@ -2161,33 +2483,61 @@ class ScoreboardApp:
                     if DEBUG:
                         _log("DEBUG", "FEED", f"Error processing linescore.offense for base occupancy (thread {threading.get_ident()})")
                 
-                # 3. Check occupancy changes to trigger base fade/runner spawn
+                # 3. Check occupancy changes to trigger base fade/runner spawn/path animation
+                # Build sets of bases that gained and lost runners this poll
+                gained = []  # bases that now have a runner that didn't before
+                lost   = []  # bases that lost a runner
+
                 for b in ("1B", "2B", "3B"):
                     was_occ, was_team = prev_base_runners[b]
                     now_occ = self.bases[b]["occupied"]
                     now_team = self.bases[b]["team"]
-                    
+
                     if now_occ and not was_occ:
-                        # Runner appeared: trigger base fade and ensure a static runner icon exists
-                        team_col = team_color_for(now_team)[0] if now_team else self.accent # Primary for base fill
-                        runner_col = team_color_for(now_team)[1] if now_team else self.accent # Accent for runner icon
-                        
-                        # Schedule fade animation and runner spawn on the main thread
+                        gained.append(b)
+                        team_col   = team_color_for(now_team)[0] if now_team else self.accent
+                        runner_col = team_color_for(now_team)[1] if now_team else self.accent
                         self.root.after(0, lambda b=b, c=team_col: self.start_fade(b, c))
                         if b not in self.runners_by_base:
-                             self.root.after(0, lambda b=b, c=runner_col: self.spawn_runner_at_base(b, color=c))
-                             
+                            self.root.after(0, lambda b=b, c=runner_col: self.spawn_runner_at_base(b, color=c))
+
                     if not now_occ and was_occ:
-                        # Runner disappeared: clear the runner icon on the main thread
+                        lost.append(b)
                         if b in self.runners_by_base:
                             rkey = self.runners_by_base.pop(b, None)
                             if rkey:
                                 info = self.runners.pop(rkey, None)
-                                # The runner move animation usually handles deletion, but this ensures cleanup
                                 if info:
                                     self.root.after(0, lambda c=info.get("cid"): self.canvas.delete(c))
-                        # Clear base animation state
                         self.bases[b]["anim"] = None
+
+                # Infer movements from occupancy deltas and animate path lines.
+                # BASE_ORDER defines valid forward movement: Home→1B→2B→3B→Home
+                base_order_idx = {"Home": 0, "1B": 1, "2B": 2, "3B": 3}
+                used_gained = set()
+                for src in lost:
+                    src_idx = base_order_idx.get(src, -1)
+                    # Find the most likely destination: a gained base that is ahead in order
+                    best_dst = None
+                    best_dist = 999
+                    for dst in gained:
+                        if dst in used_gained:
+                            continue
+                        dst_idx = base_order_idx.get(dst, -1)
+                        dist = (dst_idx - src_idx) % 4
+                        if 0 < dist < best_dist:
+                            best_dist = dist
+                            best_dst = dst
+                    if best_dst:
+                        used_gained.add(best_dst)
+                        now_team = self.bases[best_dst]["team"]
+                        anim_col = team_color_for(now_team)[1] if now_team else self.accent
+                        self.root.after(0, lambda s=src, e=best_dst, c=anim_col:
+                                        self.animate_base_path(s, e, c))
+                        self.log(f"Inferred runner movement {src} → {best_dst}", level="info", cat="GAME")
+
+                # Also check if a runner scored (lost a base, no matching gained)
+                # Those are handled by move_runner_base scoring logic elsewhere
 
                 # 4. Process currentPlay.runners for *movement/animations*
                 try:
@@ -2213,8 +2563,9 @@ class ScoreboardApp:
                         ek = to_key(mv.get("end"))
                         
                         if sk and ek:
-                            # Schedule runner movement animation on the main thread
+                            # Schedule runner movement and base path animation on the main thread
                             self.root.after(0, lambda s=sk, e=ek, c=color: self.move_runner_base(s, e, c))
+                            self.root.after(0, lambda s=sk, e=ek, c=color: self.animate_base_path(s, e, c))
                         elif ek and ek != "Home":
                             # Runner appeared (e.g., batter on 1B), spawn if not there (handled by occupancy logic, but kept for redundancy)
                             if ek not in self.runners_by_base:
@@ -2280,8 +2631,11 @@ class ScoreboardApp:
             # Only do a full GUI render when the feed actually changed.
             # When feed_unchanged=True the countdown still ticks via update_loop's partial render.
             if not feed_unchanged:
+                self._feed_unchanged = False
                 self.root.after(0, self.render_full_gui)
-            
+            else:
+                self._feed_unchanged = True
+
         finally:
             self.running_fetch = False
 

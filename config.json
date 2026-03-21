@@ -1,5 +1,4 @@
 {
-  "api_mode": "production",
   "team_id": 117,
   "teams": {
     "Arizona Diamondbacks": 109,
@@ -165,6 +164,14 @@
   "canvas": {
     "width": 1000,
     "height": 600,
-    "bg_color": "#0F2848"
-  }
+    "bg_color": "#002D62",
+    "fg_color": "#eaeaea",
+    "accent": "#EB6E1F",
+    "font_family": "Menlo"
+  },
+  "ui": {
+    "max_innings": 9
+  },
+  "debug": false,
+  "api_mode": "production"
 }
