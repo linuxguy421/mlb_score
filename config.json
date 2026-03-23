@@ -1,5 +1,5 @@
 {
-  "team_id": 117,
+  "team_id": 141,
   "teams": {
     "Arizona Diamondbacks": 109,
     "Atlanta Braves": 144,
@@ -164,9 +164,9 @@
   "canvas": {
     "width": 1000,
     "height": 600,
-    "bg_color": "#002D62",
+    "bg_color": "#134A8E",
     "fg_color": "#eaeaea",
-    "accent": "#EB6E1F",
+    "accent": "#1D2D5C",
     "font_family": "DejaVu Sans Mono"
   },
   "ui": {
