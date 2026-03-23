@@ -1,5 +1,5 @@
 {
-  "team_id": 119,
+  "team_id": 117,
   "teams": {
     "Arizona Diamondbacks": 109,
     "Atlanta Braves": 144,
@@ -160,14 +160,14 @@
     "scheduled": 300,
     "none": 3600
   },
-  "lookahead_days": 7,
+  "lookahead_days": 3,
   "canvas": {
     "width": 1000,
     "height": 600,
-    "bg_color": "#005A9C",
+    "bg_color": "#002D62",
     "fg_color": "#eaeaea",
-    "accent": "#C4CED3",
-    "font_family": "Courier New"
+    "accent": "#EB6E1F",
+    "font_family": "DejaVu Sans Mono"
   },
   "ui": {
     "max_innings": 9

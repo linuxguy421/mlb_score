@@ -511,7 +511,7 @@ class ScoreboardApp:
             "2B": {"occupied": False, "team": None, "anim": None},
             "3B": {"occupied": False, "team": None, "anim": None},
         }
-        self.empty_base_fill = "#d0d0d0"
+        self.empty_base_fill = "#0a0f1a"
 
         # runner animation state
         # rkey -> {"cid": tk_id, "base": "1B", "color": "#HEX"}
@@ -559,6 +559,10 @@ class ScoreboardApp:
         # Score flash: track previous run totals to detect scoring plays
         self._prev_runs = {"away": 0, "home": 0}
         self._score_flash = {}   # "away"|"home" -> remaining flash frames
+
+        # Bases-loaded chase animation state
+        self._chase_after_id = None
+        self._chase_t        = 0.0   # perimeter progress 0.0 → 1.0
 
         # Recent results (last 5 completed games, oldest first)
         self.recent_results = []   # list of {"wl": "W"|"L", "score": "4-2", "opp": "LAD"}
@@ -1021,6 +1025,86 @@ class ScoreboardApp:
 
         _pulse()
 
+    # ── Bases-loaded chase animation ──────────────────────────────────────────
+    _CHASE_COLOURS = [
+        "#ff0000", "#ff6600", "#ffcc00", "#00ff88",
+        "#00ccff", "#aa44ff", "#ff44aa", "#ffffff",
+    ]
+
+    def _start_bases_loaded_chase(self):
+        """Start the perimeter chase light if not already running."""
+        if self._chase_after_id is not None:
+            return
+        self._chase_t       = 0.0
+        self._chase_elapsed = 0
+        self._chase_tick()
+
+    def _stop_bases_loaded_chase(self):
+        """Stop the chase and remove its canvas items."""
+        if self._chase_after_id:
+            try:
+                self.root.after_cancel(self._chase_after_id)
+            except Exception:
+                pass
+            self._chase_after_id = None
+        self.canvas.delete("chase_light")
+
+    def _chase_tick(self):
+        """Advance chase dot one frame (~30fps). Speeds up the longer bases stay loaded."""
+        self.canvas.delete("chase_light")
+
+        cx, cy, ds = self.diamond_cx, self.diamond_cy, self.diamond_ds
+        if not cx or not ds:
+            self._chase_after_id = self.root.after(33, self._chase_tick)
+            return
+
+        # Four corners in perimeter order: Home → 1B → 2B → 3B → Home
+        corners = [
+            (cx,      cy + ds),   # Home
+            (cx + ds, cy),        # 1B
+            (cx,      cy - ds),   # 2B
+            (cx - ds, cy),        # 3B
+        ]
+        seg_t = (self._chase_t % 1.0) * 4.0
+        seg   = int(seg_t)
+        frac  = seg_t - seg
+        p1 = corners[seg % 4]
+        p2 = corners[(seg + 1) % 4]
+        dot_x = p1[0] + (p2[0] - p1[0]) * frac
+        dot_y = p1[1] + (p2[1] - p1[1]) * frac
+
+        # Interpolated rainbow colour
+        col_pos = (self._chase_t * len(self._CHASE_COLOURS)) % len(self._CHASE_COLOURS)
+        c1 = self._CHASE_COLOURS[int(col_pos) % len(self._CHASE_COLOURS)]
+        c2 = self._CHASE_COLOURS[(int(col_pos) + 1) % len(self._CHASE_COLOURS)]
+        dot_col = blend_colors(c1, c2, col_pos - int(col_pos))
+
+        # Slowly cycling diamond border
+        border_col = self._CHASE_COLOURS[int(self._chase_t * 3) % len(self._CHASE_COLOURS)]
+        border_pts = [cx, cy - ds, cx + ds, cy, cx, cy + ds, cx - ds, cy]
+        self.canvas.create_polygon(border_pts, outline=border_col,
+                                   fill="", width=4, tags="chase_light")
+
+        # Chase dot — inner filled circle + outer glow ring
+        r_dot = max(8, int(ds * 0.10))
+        self.canvas.create_oval(dot_x - r_dot*1.8, dot_y - r_dot*1.8,
+                                dot_x + r_dot*1.8, dot_y + r_dot*1.8,
+                                fill="", outline=dot_col, width=2,
+                                tags="chase_light")
+        self.canvas.create_oval(dot_x - r_dot, dot_y - r_dot,
+                                dot_x + r_dot, dot_y + r_dot,
+                                fill=dot_col, outline="white", width=1,
+                                tags="chase_light")
+
+        self.canvas.tag_raise("chase_light")
+
+        # Speed ramps from 1 lap/3s up to 1 lap/1.2s over 30 seconds loaded
+        self._chase_elapsed += 1
+        speed = min(0.040, 0.013 + self._chase_elapsed * 0.0003)
+        self._chase_t = (self._chase_t + speed) % 1.0
+
+        self._chase_after_id = self.root.after(33, self._chase_tick)
+
     def _flash_score_at_home(self, hx, hy, color, duration_ms=2000):
         """Gold expanding ring + shrinking dot at home plate when a runner scores."""
         r = max(10, int(self.diamond_ds * 0.13))
@@ -1198,6 +1282,7 @@ class ScoreboardApp:
                     pass
         self._path_pulses.clear()
         self.canvas.delete("path_pulse")
+        self._stop_bases_loaded_chase()
         self.log("All runners and path pulses cleared", verbose=True, cat="UI")
 
     def render_full_gui(self):
@@ -1553,7 +1638,7 @@ class ScoreboardApp:
                                         fill="#ffffff", tags="diamond_bases")
             else:
                 self.canvas.create_text(bx, by, text=bname, font=self.font_small,
-                                        fill=self.fg, tags="diamond_bases")
+                                        fill="#ffffff", tags="diamond_bases")
 
         # Base path lines connecting Home → 1B → 2B → 3B → Home (drawn after bases so they appear under base squares)
         # Order: Home, 1B, 2B, 3B — draw lines connecting each consecutive pair
@@ -2538,6 +2623,13 @@ class ScoreboardApp:
 
                 # Also check if a runner scored (lost a base, no matching gained)
                 # Those are handled by move_runner_base scoring logic elsewhere
+
+                # Bases-loaded chase: start when all 3 loaded, stop when any empties
+                all_loaded = all(self.bases[b]["occupied"] for b in ("1B", "2B", "3B"))
+                if all_loaded:
+                    self.root.after(0, self._start_bases_loaded_chase)
+                else:
+                    self.root.after(0, self._stop_bases_loaded_chase)
 
                 # 4. Process currentPlay.runners for *movement/animations*
                 try:

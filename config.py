@@ -12,6 +12,9 @@ from tkinter import ttk, colorchooser, messagebox
 import json
 import pathlib
 import argparse
+import datetime
+import threading
+import requests
 from copy import deepcopy
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
@@ -311,6 +314,28 @@ class ConfigEditor(tk.Tk):
 
         SP = dict(fill="x", padx=16, pady=5)
 
+        # ── Section 0: Upcoming Schedule (debug hub) ───────────────────────────
+        s0 = Section(self._body, "UPCOMING SCHEDULE  —  DEBUG HUB")
+        s0.pack(**SP)
+        s0.add_note("Next scheduled games for the followed team. Useful for planning live test sessions.")
+
+        # Schedule display frame — rows added dynamically by _refresh_schedule
+        self._sched_frame = tk.Frame(s0.body, bg=BG2)
+        self._sched_frame.grid(row=s0._r, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        s0._r += 1
+
+        # Status label + refresh button on same row
+        sched_ctrl = tk.Frame(s0.body, bg=BG2)
+        sched_ctrl.grid(row=s0._r, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        s0._r += 1
+        self._sched_status = tk.StringVar(value="Fetching schedule…")
+        tk.Label(sched_ctrl, textvariable=self._sched_status,
+                 font=(FONT, 9), fg=FG_DIM, bg=BG2).pack(side="left", padx=(0, 12))
+        mk_btn(sched_ctrl, "↻  Refresh", self._refresh_schedule).pack(side="left")
+
+        # Kick off background fetch
+        self.after(200, self._refresh_schedule)
+
         # ── Section 1: Followed Team ───────────────────────────────────────────
         s1 = Section(self._body, "FOLLOWED TEAM")
         s1.pack(**SP)
@@ -402,6 +427,160 @@ class ConfigEditor(tk.Tk):
         mk_btn(bar, "Save & Close", self._save_and_close, accent=True).pack(side="right", padx=(6, 0))
         mk_btn(bar, "Save",         self._save).pack(side="right")
 
+    # ── Schedule / debug hub ───────────────────────────────────────────────────
+    def _refresh_schedule(self):
+        """Fetch upcoming schedule in a background thread and update the display."""
+        self._sched_status.set("Fetching…")
+        for w in self._sched_frame.winfo_children():
+            w.destroy()
+        threading.Thread(target=self._fetch_schedule_bg, daemon=True).start()
+
+    def _fetch_schedule_bg(self):
+        """Background thread: fetch next 6 games from MLB Stats API."""
+        try:
+            team_id = ALL_TEAMS.get(self.v_team.get(), self.cfg.get("team_id", 117))
+            today   = datetime.date.today()
+            end     = today + datetime.timedelta(days=30)
+            r = requests.get(
+                "https://statsapi.mlb.com/api/v1/schedule",
+                params={
+                    "sportId":   1,
+                    "teamId":    team_id,
+                    "startDate": today.strftime("%Y-%m-%d"),
+                    "endDate":   end.strftime("%Y-%m-%d"),
+                    "hydrate":   "team,venue",
+                    "fields":    ("dates,date,games,gamePk,gameDate,status,"
+                                  "teams,away,home,team,name,record,wins,losses,"
+                                  "venue,name"),
+                },
+                timeout=8,
+            )
+            r.raise_for_status()
+            dates = r.json().get("dates", [])
+            games = [g for d in dates for g in d.get("games", [])][:6]
+            self.after(0, lambda: self._render_schedule(games))
+        except Exception as e:
+            self.after(0, lambda: self._sched_status.set(f"⚠  {e}"))
+
+    def _render_schedule(self, games):
+        """Render fetched games into the schedule frame."""
+        for w in self._sched_frame.winfo_children():
+            w.destroy()
+
+        if not games:
+            tk.Label(self._sched_frame, text="No upcoming games found.",
+                     font=(FONT, 9), fg=FG_DIM, bg=BG2).pack(anchor="w")
+            self._sched_status.set("No games found.")
+            return
+
+        # Column headers
+        hdr = tk.Frame(self._sched_frame, bg=BG3)
+        hdr.pack(fill="x", pady=(0, 2))
+        for col, w, anchor in [
+            ("DATE / TIME",   18, "w"),
+            ("MATCHUP",       34, "w"),
+            ("VENUE",         22, "w"),
+            ("STATUS",        18, "w"),
+            ("GAME PK",        9, "w"),
+        ]:
+            tk.Label(hdr, text=col, font=(FONT, 8, "bold"),
+                     fg=ACCENT, bg=BG3, width=w, anchor=anchor).pack(side="left", padx=2)
+
+        # Game rows
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        for i, g in enumerate(games):
+            row_bg = BG3 if i % 2 == 0 else BG2
+            row = tk.Frame(self._sched_frame, bg=row_bg, cursor="hand2")
+            row.pack(fill="x", pady=1)
+
+            # Parse game time
+            try:
+                gdt = datetime.datetime.fromisoformat(
+                    g["gameDate"].replace("Z", "+00:00"))
+                local_dt = gdt.astimezone()
+                date_str = local_dt.strftime("%a %b %d  %I:%M %p")
+                # Time-to-game for planning
+                delta = gdt - now_utc
+                total_s = int(delta.total_seconds())
+                if total_s < 0:
+                    eta = "now / in progress"
+                elif total_s < 3600:
+                    eta = f"in {total_s//60}m"
+                elif total_s < 86400:
+                    eta = f"in {total_s//3600}h {(total_s%3600)//60}m"
+                else:
+                    eta = f"in {total_s//86400}d {(total_s%86400)//3600}h"
+            except Exception:
+                date_str = g.get("gameDate", "")[:16]
+                eta = ""
+
+            away   = g.get("teams", {}).get("away", {}).get("team", {}).get("name", "?")
+            home   = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "?")
+            matchup = f"{away} @ {home}"
+
+            venue  = g.get("venue", {}).get("name", "—")
+            status = g.get("status", {}).get("detailedState", "—")
+            pk     = str(g.get("gamePk", "—"))
+
+            # Status colour
+            if "Progress" in status or "Live" in status:
+                st_col = "#2ecc71"
+            elif "Final" in status:
+                st_col = "#7f8c8d"
+            elif "Scheduled" in status or "Pre" in status:
+                st_col = ACCENT
+            else:
+                st_col = FG_DIM
+
+            for text, w, fg_c, anchor in [
+                (f"{date_str}  ({eta})", 18, FG,     "w"),
+                (matchup,                34, FG,     "w"),
+                (venue[:28],             22, FG_DIM, "w"),
+                (status,                 18, st_col, "w"),
+                (pk,                      9, FG_DIM, "w"),
+            ]:
+                tk.Label(row, text=text, font=(FONT, 9),
+                         fg=fg_c, bg=row_bg, width=w, anchor=anchor).pack(
+                             side="left", padx=2, pady=3)
+
+            # Click row → set followed team to home team, flash gold to confirm
+            orig_colors = {}
+            def _on_click(e, home_name=home, r=row, bg=row_bg, oc=orig_colors):
+                if home_name not in ALL_TEAMS:
+                    return
+                # Snapshot original label colours before flash
+                if not oc:
+                    for c in r.winfo_children():
+                        oc[c] = c.cget("fg")
+                # Flash row gold
+                try:
+                    r.configure(bg=ACCENT)
+                    for c in r.winfo_children():
+                        c.configure(bg=ACCENT, fg="#000000")
+                except Exception:
+                    pass
+                # Set team after flash starts; delay schedule refresh until after restore
+                self.v_team.set(home_name)
+                def _restore():
+                    try:
+                        if r.winfo_exists():
+                            r.configure(bg=bg)
+                            for c in r.winfo_children():
+                                if c.winfo_exists():
+                                    c.configure(bg=bg, fg=oc.get(c, FG))
+                    except Exception:
+                        pass
+                    # Now safe to refresh schedule (old widgets already restored or gone)
+                    self._refresh_schedule()
+                self.after(400, _restore)
+
+            row.bind("<Button-1>", _on_click)
+            for child in row.winfo_children():
+                child.bind("<Button-1>", _on_click)
+
+        fetched_at = datetime.datetime.now().strftime("%H:%M:%S")
+        self._sched_status.set(f"✓  {len(games)} games shown  ·  fetched {fetched_at}")
+
     # ── Team colour helpers ────────────────────────────────────────────────────
     def _get_team_colors(self, team_name):
         """Return (primary, accent) for the given team name, or None if not found."""
@@ -482,7 +661,7 @@ class ConfigEditor(tk.Tk):
     # ── Center ─────────────────────────────────────────────────────────────────
     def _center(self):
         self.update_idletasks()
-        w, h = 680, 660
+        w, h = 780, 820
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
