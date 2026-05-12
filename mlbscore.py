@@ -445,6 +445,7 @@ class ScoreboardApp:
         self.team_id = TEAM_ID
         self.polling = POLLING
         self.debug = DEBUG
+        self.pre_game_reset_minutes = int(UI_CFG.get("pre_game_reset_minutes", 15))
         self.balls = 0
         self.strikes = 0
         self.outs = 0
@@ -500,6 +501,8 @@ class ScoreboardApp:
         self.poll_interval = self.polling.get("none", 3600)
         self.next_update_in = 0
         self.running_fetch = False
+        self._pre_game_reset_active = False
+        self._pre_game_reset_game_pk = None
 
         # base path pulse animations: list of active pulse dicts
         # each: {segments: [(p1,p2),...], seg_idx: int, t: float, color: str, after_id: int|None}
@@ -749,6 +752,46 @@ class ScoreboardApp:
         """Set poll status and record the time it was set. Always call under _STATE_LOCK."""
         self._poll_status = status
         self._poll_status_set_at = time.time()
+
+    def _reset_live_display_state(self):
+        """Clear live-game display state before showing a pending game."""
+        self.live_feed = None
+        self.current_batter = "Batter: -"
+        self.current_pitcher = "Pitcher: -"
+        self.balls = 0
+        self.strikes = 0
+        self.outs = 0
+        self._last_outs = 0
+        self._outs_reset_pending = False
+        self._inning_reset_done = False
+        self._last_inning = None
+        self._last_inning_half = None
+        self._last_feed_timestamp = None
+        self._last_game_status = ""
+        self._prev_runs = {"away": 0, "home": 0}
+        self._score_flash.clear()
+        self.runner_names = {"1B": None, "2B": None, "3B": None}
+        self.sb_last_pitch_speed = None
+        self.sb_last_pitch_type = None
+        self.sb_away_record = None
+        self.sb_home_record = None
+        self.sb_last_play = None
+        self.sb_last_play_set_at = 0.0
+        self.sb_event_msg = None
+        self.sb_event_msg_set_at = 0.0
+        self.sb_batter_avg = None
+        self.sb_batter_obp = None
+        self.sb_pitch_count = None
+        self.sb_weather = None
+        self.marquee_followed_roster = []
+        self.marquee_opponent_roster = []
+        self.followed_season_stats = []
+        for k in self.bases:
+            self.bases[k]["occupied"] = False
+            self.bases[k]["team"] = None
+            self.bases[k]["anim"] = None
+            self.bases[k]["runner_name"] = None
+        self.root.after(0, self.clear_all_runners)
 
     # ── Marquee scroller ──────────────────────────────────────────────────────
 
@@ -1333,6 +1376,11 @@ class ScoreboardApp:
         if self.live_feed:
             game_src = self.live_feed.get("gameData", {}) or {}
             linescore = self.live_feed.get("liveData", {}).get("linescore", {}) or {}
+        elif self._pre_game_reset_active and self.next_game:
+            # Inside the pre-game reset window, show the upcoming matchup instead
+            # of keeping the previous final game on the board.
+            game_src = self.next_game
+            linescore = self.next_game.get("linescore", {}) or {}
         elif self.last_game:
             game_src = self.last_game
             linescore = self.last_game.get("linescore", {}) or {}
@@ -1890,6 +1938,12 @@ class ScoreboardApp:
         if self.sb_weather:
             stat_cell(self.width // 2, game_row_cy, "weather", self.sb_weather)
 
+        # ── Right-side controls: two reserved slots from the right edge ──────────
+        # Each slot is 13% of canvas width (min 100px) so they never collide.
+        _slot_w  = max(100, int(self.width * 0.13))
+        _api_cx  = self.width - _slot_w // 2            # API Status centre
+        _poll_cx = self.width - _slot_w - _slot_w // 2  # Next Poll centre (one slot left)
+
         # API Status pill
         elapsed_since_status = time.time() - self._poll_status_set_at
         effective_poll_status = self._poll_status
@@ -1908,24 +1962,30 @@ class ScoreboardApp:
             "pending":   "#616161",
         }.get(effective_poll_status, "#616161")
         pill_fg = "#000000"
-        api_pill_x = self.width - 8
         pill_w = self.font_sb_value.measure(poll_status_text)
         pill_h = self.font_sb_value.metrics("linespace")
-        pill_cx = api_pill_x - pill_w // 2 - 2
-        self.canvas.create_text(pill_cx, game_row_cy - lbl_off, text="API STATUS",
+        # Divide the row into top-quarter (label) and bottom-three-quarters (pill),
+        # then clamp the pill so it never crosses sep2.
+        row_top = sep1          # top of game-state row
+        row_bot = sep2          # bottom of game-state row
+        lbl_cy  = row_top + (row_bot - row_top) // 4        # label at 25% into row
+        pill_cy = row_top + (row_bot - row_top) * 3 // 4   # pill  at 75% into row
+        # Hard-clamp: pill rect must not touch either separator
+        pad = 2
+        half_ph = min(pill_h // 2, (row_bot - row_top) // 4 - pad)
+        self.canvas.create_text(_api_cx, lbl_cy, text="API STATUS",
                                 font=self.font_sb_label, fill="#cccccc",
                                 anchor="center", tags=tag)
-        pill_cy = game_row_cy + val_off
-        self.canvas.create_rectangle(api_pill_x - pill_w - 4, pill_cy - pill_h // 2,
-                                     api_pill_x + 4, pill_cy + pill_h // 2,
+        self.canvas.create_rectangle(_api_cx - pill_w // 2 - 2, pill_cy - half_ph,
+                                     _api_cx + pill_w // 2 + 2, pill_cy + half_ph,
                                      fill=poll_bg_color, outline="", tags=tag)
-        self.canvas.create_text(api_pill_x, pill_cy, text=poll_status_text,
+        self.canvas.create_text(_api_cx, pill_cy, text=poll_status_text,
                                 font=self.font_sb_value, fill=pill_fg,
-                                anchor="e", tags=tag)
+                                anchor="center", tags=tag)
 
-        # Next poll countdown
+        # Next poll countdown (one slot to the left of API Status)
         time_display = self.format_seconds_to_dhms_string(self.next_update_in)
-        stat_cell(self.width - max(80, int(self.width * 0.11)), game_row_cy, "next poll", time_display)
+        stat_cell(_poll_cx, game_row_cy, "next poll", time_display)
 
         # Error indicator
         if self._fetch_error:
@@ -2153,6 +2213,39 @@ class ScoreboardApp:
             with _STATE_LOCK:
                 self.recent_results = new_recent[-5:]  # keep last 5
 
+            pre_game_reset_active = False
+            pre_game_reset_game_pk = None
+            pre_game_seconds = None
+            if next_game and next_game.get("gameDate_dt") and not live_game:
+                try:
+                    dt_next_utc = next_game["gameDate_dt"].astimezone(datetime.timezone.utc)
+                    pre_game_seconds = (dt_next_utc - now_utc).total_seconds()
+                    reset_window = max(0, self.pre_game_reset_minutes) * 60
+                    pre_game_reset_active = 0 <= pre_game_seconds <= reset_window
+                    if pre_game_reset_active:
+                        pre_game_reset_game_pk = next_game.get("gamePk")
+                except Exception:
+                    pre_game_reset_active = False
+                    pre_game_reset_game_pk = None
+
+            if pre_game_reset_active and (
+                not self._pre_game_reset_active
+                or self._pre_game_reset_game_pk != pre_game_reset_game_pk
+            ):
+                self.log(
+                    f"Pre-game reset window active: clearing previous game display "
+                    f"{self.pre_game_reset_minutes} minutes before first pitch.",
+                    level="info",
+                    cat="GAME",
+                )
+                with _STATE_LOCK:
+                    self._reset_live_display_state()
+            elif live_game:
+                # A live game always leaves pending-game display mode.
+                self._pre_game_reset_game_pk = None
+
+            self._pre_game_reset_active = pre_game_reset_active
+            self._pre_game_reset_game_pk = pre_game_reset_game_pk
             self.last_game = last_game
             self.next_game = next_game
             self.live_game = live_game
@@ -2163,7 +2256,10 @@ class ScoreboardApp:
                 except Exception:
                     pass
 
-            chosen = live_game or last_game
+            # During the pre-game reset window, do not keep polling/rendering the
+            # previous final game's live feed. That lets render() show next_game
+            # with a clean B/S/O, bases, and status bar until the new game is live.
+            chosen = live_game or (None if self._pre_game_reset_active else last_game)
             prev_base_runners = {k: (self.bases[k]["occupied"], self.bases[k]["team"]) for k in self.bases}
 
             feed = None
@@ -2672,18 +2768,9 @@ class ScoreboardApp:
                     self.log("Successfully polled feed and updated state", verbose=True, cat="POLL")
                     self._last_poll_time = now
             else:
-                # No live feed - clear BSO/names/bases
-                self.current_batter = "Batter: -"
-                self.current_pitcher = "Pitcher: -"
-                self.balls = 0
-                self.strikes = 0
-                self.outs = 0
-                for k in self.bases:
-                    self.bases[k]["occupied"] = False
-                    self.bases[k]["team"] = None
-                    self.bases[k]["anim"] = None
-                self.root.after(0, self.clear_all_runners)
-                self._inning_reset_done = False # Reset flag if game ends/switches
+                # No live feed - clear BSO/names/bases and any live-only status data.
+                with _STATE_LOCK:
+                    self._reset_live_display_state()
 
             # --- Smart Polling Calculation ---
             if live_game:
@@ -2752,6 +2839,24 @@ class ScoreboardApp:
 # Entrypoint
 def main():
     root = tk.Tk()
+
+    # ── Screen-aware canvas sizing ───────────────────────────────────────────
+    # Clamp the configured canvas dimensions to 90 % of the actual screen so
+    # the window never overflows on small / low-res displays.  The internal
+    # layout already scales proportionally via _compute_layout(), so shrinking
+    # the starting size here is the only change needed.
+    root.update_idletasks()   # ensure winfo_screen* returns real values
+    _sw = root.winfo_screenwidth()
+    _sh = root.winfo_screenheight()
+    _max_w = max(640,  int(_sw * 0.90))
+    _max_h = max(400,  int(_sh * 0.90))
+    CANVAS_CFG["width"]  = min(CANVAS_CFG.get("width",  1100), _max_w)
+    CANVAS_CFG["height"] = min(CANVAS_CFG.get("height",  700), _max_h)
+    _log("INFO", "APP",
+         f"Screen {_sw}×{_sh} → canvas clamped to "
+         f"{CANVAS_CFG['width']}×{CANVAS_CFG['height']}")
+    # ────────────────────────────────────────────────────────────────────────
+
     # --- Ctrl+C Signal Handler ---
     def sigint_handler(signum, frame):
         """Handles SIGINT (Ctrl+C) for clean exit."""
